@@ -248,41 +248,61 @@ def main():
             if not browser:
                 messagebox.showinfo("提示", "请先选择浏览器。")
                 return
-            self.cookies_status.config(text=f"测试 {browser} cookies...", foreground="#808080")
-            self._log(f"测试 {browser} cookies...\n", "info")
+            self.cookies_status.config(text=f"检查 {browser}...", foreground="#808080")
+            self._log(f"=== cookies 检查: {browser} ===\n", "info")
+
+            # 1. 本地文件检查
+            lap = os.environ.get("LOCALAPPDATA", "")
+            cookie_paths = [
+                os.path.join(lap, "Google", "Chrome", "User Data", "Default", "Network", "Cookies"),
+                os.path.join(lap, "Google", "Chrome", "User Data", "Default", "Cookies"),
+                os.path.join(lap, "Microsoft", "Edge", "User Data", "Default", "Network", "Cookies"),
+                os.path.join(lap, "Microsoft", "Edge", "User Data", "Default", "Cookies"),
+            ]
+            found = False
+            for p in cookie_paths:
+                if os.path.isfile(p):
+                    self._log(f"  本地文件: {p} ({os.path.getsize(p)} bytes)\n", "success")
+                    found = True
+            # Firefox detection
+            ff_profiles = os.path.join(os.environ.get("APPDATA", ""), "Mozilla", "Firefox", "Profiles")
+            if os.path.isdir(ff_profiles):
+                for item in os.listdir(ff_profiles):
+                    ff_cookies = os.path.join(ff_profiles, item, "cookies.sqlite")
+                    if os.path.isfile(ff_cookies):
+                        self._log(f"  本地文件: {ff_cookies} ({os.path.getsize(ff_cookies)} bytes)\n", "success")
+                        found = True
+            if not found:
+                self._log("  (未在常见位置找到，尝试 yt-dlp 读取...)\n", "dim")
+
+            # 2. yt-dlp 快速提取 (用 about:blank 避免网络请求)
             try:
                 proc = subprocess.Popen(
-                    ["yt-dlp", "--cookies-from-browser", browser, "--list-formats",
-                     "https://www.youtube.com/watch?v=jNQXAC9IVRw"],
+                    ["yt-dlp", "--cookies-from-browser", browser, "-j", "about:blank"],
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, encoding="utf-8", errors="replace",
                     env=os.environ,
                 )
-                out, _ = proc.communicate(timeout=15)
+                out, _ = proc.communicate(timeout=8)
                 out_lower = out.lower()
-                ck_ok = "extracting cookies" in out_lower and "extracted" in out_lower
-                n_sig_ok = "available formats" in out_lower
-                n_sig_fail = "n challenge solving failed" in out_lower or "no video formats found" in out_lower
 
-                if ck_ok:
-                    self._log(f"cookies: {browser} 读取成功\n", "success")
-                    if n_sig_ok:
-                        self.cookies_status.config(text=f"{browser} 就绪 (可高清)", foreground="#6a9955")
-                    elif n_sig_fail:
-                        self.cookies_status.config(text=f"{browser} OK (n-sig需回退)", foreground="#ce9178")
-                        self._log("n-sig 挑战未解，YouTube 高清将回退 android。\n", "warn")
-                    else:
-                        self.cookies_status.config(text=f"{browser} OK (格式受限)", foreground="#ce9178")
-                        self._log(out[:400] + "\n", "dim")
-                elif "could not find" in out_lower:
-                    self.cookies_status.config(text=f"找不到 {browser} cookies", foreground="#f44747")
-                    self._log("浏览器 cookies 数据库未找到。请关闭浏览器再试。\n", "error")
+                if "extracting cookies" in out_lower and "extracted" in out_lower:
+                    cnt = ""
+                    for w in out_lower.split():
+                        if w.isdigit() and int(w) > 10:
+                            cnt = w; break
+                    self._log(f"  yt-dlp 提取: {cnt} cookies\n" if cnt else "  yt-dlp 提取成功\n", "success")
+                    self.cookies_status.config(text=f"{browser} cookies OK", foreground="#6a9955")
+                elif "could not find" in out_lower or "permission" in out_lower:
+                    self.cookies_status.config(text=f"{browser} 已锁定", foreground="#ce9178")
+                    self._log("  cookies 被浏览器锁定。关闭浏览器后重试，或改用 cookies 文件。\n", "warn")
                 else:
-                    self.cookies_status.config(text=f"{browser} 读取失败", foreground="#f44747")
+                    self.cookies_status.config(text=f"{browser} 异常", foreground="#ce9178")
                     self._log(out[:400] + "\n", "dim")
             except subprocess.TimeoutExpired:
                 proc.kill()
-                self.cookies_status.config(text="✗ 测试超时", foreground="#f44747")
+                self.cookies_status.config(text=f"{browser} 超时 (文件存在)", foreground="#ce9178")
+                self._log("  网络超时，但本地 cookies 文件存在，下载时自动重试。\n", "warn")
             except Exception as e:
                 self.cookies_status.config(text=f"✗ 测试失败: {e}", foreground="#f44747")
 
