@@ -76,6 +76,29 @@ def main():
             self.url_entry.pack(fill="x", expand=True)
             self.url_entry.bind("<Button-3>", self._on_right_click_url)
 
+            # ── Cookies 配置 ──
+            ttk.Label(main, text="Cookies 来源 (高清需要)").pack(anchor="w", pady=(8, 0))
+            cookies_row = ttk.Frame(main)
+            cookies_row.pack(fill="x", pady=(2, 8))
+            self.cookies_browser_var = tk.StringVar(
+                value=self.config.get("cookies_from_browser", "")
+            )
+            browsers = ["chrome", "edge", "firefox", "opera", "brave", ""]
+            cb_cookies = ttk.Combobox(cookies_row, textvariable=self.cookies_browser_var,
+                                      values=browsers, width=8)
+            cb_cookies.pack(side="left")
+            cb_cookies.bind("<<ComboboxSelected>>", self._on_cookies_change)
+            ttk.Label(cookies_row, text="浏览器 或").pack(side="left", padx=4)
+            self.cookies_file_var = tk.StringVar(
+                value=self.config.get("cookies_file", "")
+            )
+            file_entry = ttk.Entry(cookies_row, textvariable=self.cookies_file_var, width=35)
+            file_entry.pack(side="left", padx=4)
+            ttk.Button(cookies_row, text="浏览...", command=self._browse_cookies_file, width=6).pack(side="left")
+            self.cookies_status = ttk.Label(cookies_row, text="", foreground="gray")
+            self.cookies_status.pack(side="left", padx=8)
+            self._update_cookies_status()
+
             row = ttk.Frame(main)
             row.pack(fill="x", pady=4)
             ttk.Label(row, text="平台").pack(side="left")
@@ -162,6 +185,49 @@ def main():
                     self.url_var.set(text)
             except Exception:
                 pass
+
+        def _on_cookies_change(self, event=None):
+            """浏览器 cookies 选择变化时更新配置并保存。"""
+            self._save_cookies_config()
+            self._update_cookies_status()
+
+        def _browse_cookies_file(self):
+            path = filedialog.askopenfilename(
+                title="选择 cookies.txt 文件",
+                filetypes=[("Cookies 文件", "*.txt"), ("所有文件", "*.*")]
+            )
+            if path:
+                self.cookies_file_var.set(path)
+                self._save_cookies_config()
+                self._update_cookies_status()
+
+        def _save_cookies_config(self):
+            """将当前 cookies 设置保存到 config.json。"""
+            browser = self.cookies_browser_var.get().strip() or None
+            file_path = self.cookies_file_var.get().strip() or None
+            self.config["cookies_from_browser"] = browser
+            self.config["cookies_file"] = file_path
+            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+            try:
+                import json
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(self.config, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+
+        def _update_cookies_status(self):
+            """更新 cookies 状态显示。"""
+            browser = self.cookies_browser_var.get().strip()
+            file_path = self.cookies_file_var.get().strip()
+            if file_path:
+                if os.path.isfile(file_path):
+                    self.cookies_status.config(text=f"✓ 文件就绪 ({os.path.basename(file_path)})", foreground="#6a9955")
+                else:
+                    self.cookies_status.config(text="✗ 文件不存在", foreground="#f44747")
+            elif browser:
+                self.cookies_status.config(text=f"✓ 从 {browser} 读取", foreground="#6a9955")
+            else:
+                self.cookies_status.config(text="未配置 (仅低清)", foreground="#808080")
 
         def _on_platform_change(self, event=None):
             tips = {
