@@ -61,8 +61,20 @@ def main():
             self.root.minsize(600, 450)
             self.config = load_config()
             self.process = None
+            self._fix_env()
             self._setup_ui()
             self._check_env()
+
+        @staticmethod
+        def _fix_env():
+            """确保 yt-dlp 能找到浏览器 cookies 所需的环境变量。"""
+            import getpass
+            username = os.environ.get("USERNAME") or getpass.getuser()
+            home = os.environ.get("USERPROFILE") or f"C:\\Users\\{username}"
+            if not os.environ.get("LOCALAPPDATA"):
+                os.environ["LOCALAPPDATA"] = f"{home}\\AppData\\Local"
+            if not os.environ.get("APPDATA"):
+                os.environ["APPDATA"] = f"{home}\\AppData\\Roaming"
 
         def _setup_ui(self):
             main = ttk.Frame(self.root, padding=12)
@@ -97,6 +109,7 @@ def main():
             ttk.Button(cookies_row, text="浏览...", command=self._browse_cookies_file, width=6).pack(side="left")
             self.cookies_status = ttk.Label(cookies_row, text="", foreground="gray")
             self.cookies_status.pack(side="left", padx=8)
+            ttk.Button(cookies_row, text="测试", command=self._test_cookies, width=4).pack(side="left")
             self._update_cookies_status()
 
             row = ttk.Frame(main)
@@ -225,9 +238,41 @@ def main():
                 else:
                     self.cookies_status.config(text="✗ 文件不存在", foreground="#f44747")
             elif browser:
-                self.cookies_status.config(text=f"✓ 从 {browser} 读取", foreground="#6a9955")
+                self.cookies_status.config(text=f"从 {browser} 读取 (关闭浏览器后生效)", foreground="#ce9178")
             else:
                 self.cookies_status.config(text="未配置 (仅低清)", foreground="#808080")
+
+        def _test_cookies(self):
+            """测试浏览器 cookies 是否可读取。"""
+            browser = self.cookies_browser_var.get().strip()
+            if not browser:
+                messagebox.showinfo("提示", "请先选择浏览器。")
+                return
+            self.cookies_status.config(text=f"测试 {browser} cookies...", foreground="#808080")
+            self._log(f"测试 {browser} cookies...\n", "info")
+            try:
+                proc = subprocess.Popen(
+                    ["yt-dlp", "--cookies-from-browser", browser, "--list-formats",
+                     "https://www.youtube.com/watch?v=jNQXAC9IVRw"],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace",
+                    env=os.environ,
+                )
+                out, _ = proc.communicate(timeout=15)
+                if proc.returncode == 0 and "Available formats" in out:
+                    self.cookies_status.config(text=f"✓ {browser} cookies OK", foreground="#6a9955")
+                    self._log(f"✓ {browser} cookies 可读\n", "success")
+                elif "could not find" in out.lower():
+                    self.cookies_status.config(text=f"✗ 找不到 {browser} cookies (关闭浏览器后重试)", foreground="#f44747")
+                    self._log(f"✗ 无法读取 {browser} cookies。请关闭所有 {browser} 窗口后重试。\n", "error")
+                else:
+                    self.cookies_status.config(text=f"✗ {browser} 读取失败", foreground="#f44747")
+                    self._log(out[:500] + "\n", "dim")
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                self.cookies_status.config(text="✗ 测试超时", foreground="#f44747")
+            except Exception as e:
+                self.cookies_status.config(text=f"✗ 测试失败: {e}", foreground="#f44747")
 
         def _on_platform_change(self, event=None):
             tips = {
@@ -304,7 +349,7 @@ def main():
                 self.process = subprocess.Popen(
                     args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, encoding="utf-8", errors="replace", bufsize=1,
-                    env={**os.environ, "LOCALAPPDATA": os.environ.get("LOCALAPPDATA", "")},
+                    env=os.environ,
                 )
             except Exception as e:
                 self._log(f"启动失败: {e}\n", "error")
