@@ -74,6 +74,7 @@ def main():
             self.url_var = tk.StringVar()
             self.url_entry = ttk.Entry(url_frame, textvariable=self.url_var, font=("Consolas", 10))
             self.url_entry.pack(fill="x", expand=True)
+            self.url_entry.bind("<Button-3>", self._on_right_click_url)
 
             row = ttk.Frame(main)
             row.pack(fill="x", pady=4)
@@ -145,6 +146,22 @@ def main():
             path = filedialog.askdirectory(title="选择下载目录")
             if path:
                 self.output_var.set(path)
+
+        def _on_right_click_url(self, event):
+            menu = tk.Menu(self.root, tearoff=0)
+            menu.add_command(label="粘贴", command=self._paste_url)
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+
+        def _paste_url(self):
+            try:
+                text = self.root.clipboard_get().strip()
+                if text:
+                    self.url_var.set(text)
+            except Exception:
+                pass
 
         def _on_platform_change(self, event=None):
             tips = {
