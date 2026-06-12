@@ -26,6 +26,9 @@ PLATFORM_PRESETS = {
         "write_auto_subs": True,
         "sub_langs": "zh-Hans,en",
         "no_playlist": True,
+        # 默认使用 android+ios 客户端绕过 web 端的 n-sig 挑战
+        # 如需高清 + 中文硬字幕，切换为 "web" 并确保 cookies 可用
+        "extractor_args": "youtube:player_client=android,ios",
     },
     "twitter": {
         "format": "best",
@@ -46,7 +49,6 @@ def load_config(config_path: str | None = None) -> dict:
     """加载 JSON 配置文件，不存在则返回默认值。"""
     if config_path is None:
         config_path = Path(__file__).parent / "config.json"
-
     if Path(config_path).exists():
         with open(config_path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -160,6 +162,12 @@ def main():
   fetch.py https://x.com/xxx/status/123456 --platform twitter
   fetch.py https://example.com/video.mp4 --platform generic -o ./videos
   fetch.py URL --platform youtube --extra "--write-thumbnail" "--embed-thumbnail"
+
+YouTube 提示:
+  默认使用 android+ios 客户端（无需 cookies，绕过 n-sig 挑战）。
+  如需 web 端高清格式 + 字幕，在 config.json 中覆盖：
+    "youtube": {"extractor_args": "youtube:player_client=web"}
+  并确保 cookies_from_browser 配置正确。
         """,
     )
     parser.add_argument("url", help="视频 URL")

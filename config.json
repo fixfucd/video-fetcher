@@ -1,5 +1,5 @@
 {
-  "_说明": "video-fetcher 配置文件。修改后即时生效，不需要重启。",
+  "_说明": "video-fetcher 配置文件。修改后即时生效。",
   "output_dir": "E:/工作/work2/downloads",
   "cookies_from_browser": "chrome",
   "cookies_file": null,
@@ -11,7 +11,8 @@
     "youtube": {
       "format": "bestvideo[height<=2160]+bestaudio/best",
       "merge_output_format": "mp4",
-      "sub_langs": "zh-Hans,en"
+      "sub_langs": "zh-Hans,en",
+      "_extractor_note": "默认 android+ios 客户端绕过 n-sig。需 web+4K 字幕时改为: youtube:player_client=web，并确保 cookies 可用"
     },
     "twitter": {
       "format": "best",
