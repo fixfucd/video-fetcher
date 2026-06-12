@@ -1,0 +1,30 @@
+{
+  "_说明": "video-fetcher 配置文件。修改后即时生效，不需要重启。",
+  "output_dir": "E:/工作/work2/downloads",
+  "cookies_from_browser": "chrome",
+  "cookies_file": null,
+  "platforms": {
+    "bilibili": {
+      "format": "bestvideo+bestaudio/best",
+      "merge_output_format": "mp4"
+    },
+    "youtube": {
+      "format": "bestvideo[height<=2160]+bestaudio/best",
+      "merge_output_format": "mp4",
+      "sub_langs": "zh-Hans,en"
+    },
+    "twitter": {
+      "format": "best",
+      "merge_output_format": "mp4"
+    },
+    "generic": {
+      "format": "bestvideo+bestaudio/best",
+      "merge_output_format": "mp4"
+    }
+  },
+  "yt_dlp_global": {
+    "concurrent_fragments": 8,
+    "no_overwrites": true,
+    "restrict_filenames": true
+  }
+}
