@@ -259,15 +259,27 @@ def main():
                     env=os.environ,
                 )
                 out, _ = proc.communicate(timeout=15)
-                if proc.returncode == 0 and "Available formats" in out:
-                    self.cookies_status.config(text=f"✓ {browser} cookies OK", foreground="#6a9955")
-                    self._log(f"✓ {browser} cookies 可读\n", "success")
-                elif "could not find" in out.lower():
-                    self.cookies_status.config(text=f"✗ 找不到 {browser} cookies (关闭浏览器后重试)", foreground="#f44747")
-                    self._log(f"✗ 无法读取 {browser} cookies。请关闭所有 {browser} 窗口后重试。\n", "error")
+                out_lower = out.lower()
+                ck_ok = "extracting cookies" in out_lower and "extracted" in out_lower
+                n_sig_ok = "available formats" in out_lower
+                n_sig_fail = "n challenge solving failed" in out_lower or "no video formats found" in out_lower
+
+                if ck_ok:
+                    self._log(f"cookies: {browser} 读取成功\n", "success")
+                    if n_sig_ok:
+                        self.cookies_status.config(text=f"{browser} 就绪 (可高清)", foreground="#6a9955")
+                    elif n_sig_fail:
+                        self.cookies_status.config(text=f"{browser} OK (n-sig需回退)", foreground="#ce9178")
+                        self._log("n-sig 挑战未解，YouTube 高清将回退 android。\n", "warn")
+                    else:
+                        self.cookies_status.config(text=f"{browser} OK (格式受限)", foreground="#ce9178")
+                        self._log(out[:400] + "\n", "dim")
+                elif "could not find" in out_lower:
+                    self.cookies_status.config(text=f"找不到 {browser} cookies", foreground="#f44747")
+                    self._log("浏览器 cookies 数据库未找到。请关闭浏览器再试。\n", "error")
                 else:
-                    self.cookies_status.config(text=f"✗ {browser} 读取失败", foreground="#f44747")
-                    self._log(out[:500] + "\n", "dim")
+                    self.cookies_status.config(text=f"{browser} 读取失败", foreground="#f44747")
+                    self._log(out[:400] + "\n", "dim")
             except subprocess.TimeoutExpired:
                 proc.kill()
                 self.cookies_status.config(text="✗ 测试超时", foreground="#f44747")
