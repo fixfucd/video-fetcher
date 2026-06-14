@@ -46,7 +46,7 @@ def main():
         from fetch import (
             PLATFORM_PRESETS, load_config, get_platform_presets,
             build_yt_dlp_args, check_tool, normalize_douyin_url,
-            cleanup_temp_files,
+            cleanup_temp_files, check_output_exists,
         )
     except ImportError as e:
         print(f"导入 fetch 模块失败: {e}", file=sys.stderr)
@@ -364,6 +364,10 @@ def main():
 
             high, fallback = get_platform_presets(platform, self.config)
 
+            # 记录开始时间，用于后续文件存在检查
+            import time
+            start_time = time.time()
+
             # Round 1: 高清 (cookies)
             self._log("--- Round 1: 高清 (cookies) ---\n", "info")
             rc = self._run(url, output_dir, high, use_cookies=True)
@@ -373,8 +377,16 @@ def main():
                 self._on_done(0)
                 return
 
+            # 检查视频文件是否实际已存在
+            existing = check_output_exists(output_dir, start_time)
+            if existing:
+                self._log(f"\nyt-dlp 返回非零(exit={rc})，但检测到 {len(existing)} 个视频文件，视为下载成功\n", "success")
+                self._log("  " + ", ".join(f.name for f in existing) + "\n", "dim")
+                cleanup_temp_files(output_dir)
+                self._on_done(0)
+                return
+
             # cookies 错误 + 自动重试
-            import time
             self._log("\n[!] Cookies 可能被浏览器锁定，2秒后重试...\n", "warn")
             self._log("  建议: 关闭 Chrome 后重试，或在 config.json 中设置 cookies_file\n", "dim")
             time.sleep(2)
@@ -382,6 +394,15 @@ def main():
             rc = self._run(url, output_dir, high, use_cookies=True)
             if rc == 0:
                 self._log("\n重试成功，高清下载完成\n", "success")
+                cleanup_temp_files(output_dir)
+                self._on_done(0)
+                return
+
+            # 重试后也检查文件
+            existing = check_output_exists(output_dir, start_time)
+            if existing:
+                self._log(f"\n重试后 yt-dlp 仍返回非零，但检测到 {len(existing)} 个视频文件，视为下载成功\n", "success")
+                self._log("  " + ", ".join(f.name for f in existing) + "\n", "dim")
                 cleanup_temp_files(output_dir)
                 self._on_done(0)
                 return

@@ -167,6 +167,27 @@ def check_tool(name):
         return True
 
 
+def check_output_exists(output_dir, after_timestamp=None):
+    """检查输出目录中是否有视频文件（在指定时间戳之后创建）。
+
+    返回匹配的文件列表。用于判断 yt-dlp 返回非零退出码时视频是否实际已存在。
+    """
+    video_exts = {".mp4", ".mkv", ".webm", ".flv", ".ts", ".mov", ".avi", ".3gp"}
+    candidates = []
+    try:
+        for f in Path(output_dir).iterdir():
+            if not f.is_file():
+                continue
+            if f.suffix.lower() not in video_exts:
+                continue
+            if after_timestamp is not None and f.stat().st_mtime < after_timestamp:
+                continue
+            candidates.append(f)
+    except OSError:
+        pass
+    return candidates
+
+
 def cleanup_temp_files(output_dir):
     """删除 yt-dlp / ffmpeg 残留的临时文件"""
     patterns = ["*.part", "*.ytdl", "*.temp.*", "*.part-*"]
@@ -197,6 +218,10 @@ def fetch(url, platform="generic", output_dir=None, config_path=None, extra_args
 
     high, fallback = get_platform_presets(platform, config)
 
+    # 记录下载前时间戳，用于后续判断文件是否实际生成
+    import time
+    start_time = time.time()
+
     # Round 1: high quality + cookies
     print(f"[video-fetcher] 平台: {platform} | 尝试高清 (cookies)")
     print(f"[video-fetcher] 输出: {output_dir}")
@@ -208,6 +233,15 @@ def fetch(url, platform="generic", output_dir=None, config_path=None, extra_args
     sys.stderr.write(proc.stderr or "")
     if proc.returncode == 0:
         print("[video-fetcher] 高清下载成功")
+        cleanup_temp_files(output_dir)
+        return 0
+
+    # 检查视频文件是否实际已存在（yt-dlp 可能返回非零但文件已生成）
+    existing = check_output_exists(output_dir, start_time)
+    if existing:
+        print(f"[video-fetcher] yt-dlp 返回非零 (exit={proc.returncode})，但检测到 {len(existing)} 个视频文件，视为下载成功")
+        for f in existing:
+            print(f"  ✓ {f.name}")
         cleanup_temp_files(output_dir)
         return 0
 
@@ -258,6 +292,15 @@ def fetch(url, platform="generic", output_dir=None, config_path=None, extra_args
                 cleanup_temp_files(output_dir)
                 return 0
             print(f"[video-fetcher] 备用浏览器也失败，继续回退")
+
+        # 所有高清尝试均返回非零，检查文件是否实际已存在
+        existing = check_output_exists(output_dir, start_time)
+        if existing:
+            print(f"[video-fetcher] 多次尝试后 yt-dlp 仍返回非零，但检测到 {len(existing)} 个视频文件，视为下载成功")
+            for f in existing:
+                print(f"  ✓ {f.name}")
+            cleanup_temp_files(output_dir)
+            return 0
 
     # 回退说明：对于抖音/generic，回退画质不变
     if platform in ("douyin", "generic"):
