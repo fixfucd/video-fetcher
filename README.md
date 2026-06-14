@@ -17,6 +17,10 @@ python fetch.py "https://www.youtube.com/watch?v=mcTAHffEkIw" -p youtube
 
 # X / Twitter
 python fetch.py "https://x.com/xxx/status/123456" -p twitter
+
+# 抖音 / 抖音精选
+python fetch.py "https://www.douyin.com/video/7649969359930982011" -p douyin
+python fetch.py "https://www.douyin.com/jingxuan?modal_id=7649969359930982011" -p douyin
 ```
 
 ### 可视化客户端
@@ -45,6 +49,7 @@ python gui.py
 |------|------|----------|
 | B站 | 4K (cookies) | 720p |
 | YouTube | 4K+字幕 (web+cookies) | 720p (android) |
+| 抖音 | bestvideo+bestaudio (cookies) | best |
 | Twitter | 最佳 (cookies) | 无 |
 | 通用 | bestvideo+bestaudio | best |
 

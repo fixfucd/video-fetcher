@@ -14,6 +14,10 @@
       "sub_langs": "zh-Hans,en",
       "_extractor_note": "默认 android+ios 客户端绕过 n-sig。需 web+4K 字幕时改为: youtube:player_client=web，并确保 cookies 可用"
     },
+    "douyin": {
+      "format": "bestvideo+bestaudio/best",
+      "merge_output_format": "mp4"
+    },
     "twitter": {
       "format": "best",
       "merge_output_format": "mp4"
@@ -25,7 +29,7 @@
   },
   "yt_dlp_global": {
     "concurrent_fragments": 8,
-    "no_overwrites": true,
+    "no_overwrites": false,
     "restrict_filenames": true
   }
 }

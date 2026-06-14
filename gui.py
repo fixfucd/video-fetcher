@@ -45,7 +45,8 @@ def main():
     try:
         from fetch import (
             PLATFORM_PRESETS, load_config, get_platform_presets,
-            build_yt_dlp_args, check_tool,
+            build_yt_dlp_args, check_tool, normalize_douyin_url,
+            cleanup_temp_files,
         )
     except ImportError as e:
         print(f"导入 fetch 模块失败: {e}", file=sys.stderr)
@@ -115,7 +116,7 @@ def main():
             row = ttk.Frame(main)
             row.pack(fill="x", pady=4)
             ttk.Label(row, text="平台").pack(side="left")
-            self.platform_var = tk.StringVar(value="generic")
+            self.platform_var = tk.StringVar(value="douyin")
             cb = ttk.Combobox(row, textvariable=self.platform_var,
                               values=list(PLATFORM_PRESETS.keys()), state="readonly", width=10)
             cb.pack(side="left", padx=6)
@@ -248,29 +249,61 @@ def main():
             if not browser:
                 messagebox.showinfo("提示", "请先选择浏览器。")
                 return
-            self.cookies_status.config(text=f"测试 {browser} cookies...", foreground="#808080")
-            self._log(f"测试 {browser} cookies...\n", "info")
+            self.cookies_status.config(text=f"检查 {browser}...", foreground="#808080")
+            self._log(f"=== cookies 检查: {browser} ===\n", "info")
+
+            # 1. 本地文件检查
+            lap = os.environ.get("LOCALAPPDATA", "")
+            cookie_paths = [
+                os.path.join(lap, "Google", "Chrome", "User Data", "Default", "Network", "Cookies"),
+                os.path.join(lap, "Google", "Chrome", "User Data", "Default", "Cookies"),
+                os.path.join(lap, "Microsoft", "Edge", "User Data", "Default", "Network", "Cookies"),
+                os.path.join(lap, "Microsoft", "Edge", "User Data", "Default", "Cookies"),
+            ]
+            found = False
+            for p in cookie_paths:
+                if os.path.isfile(p):
+                    self._log(f"  本地文件: {p} ({os.path.getsize(p)} bytes)\n", "success")
+                    found = True
+            # Firefox detection
+            ff_profiles = os.path.join(os.environ.get("APPDATA", ""), "Mozilla", "Firefox", "Profiles")
+            if os.path.isdir(ff_profiles):
+                for item in os.listdir(ff_profiles):
+                    ff_cookies = os.path.join(ff_profiles, item, "cookies.sqlite")
+                    if os.path.isfile(ff_cookies):
+                        self._log(f"  本地文件: {ff_cookies} ({os.path.getsize(ff_cookies)} bytes)\n", "success")
+                        found = True
+            if not found:
+                self._log("  (未在常见位置找到，尝试 yt-dlp 读取...)\n", "dim")
+
+            # 2. yt-dlp 快速提取 (用 about:blank 避免网络请求)
             try:
                 proc = subprocess.Popen(
-                    ["yt-dlp", "--cookies-from-browser", browser, "--list-formats",
-                     "https://www.youtube.com/watch?v=jNQXAC9IVRw"],
+                    ["yt-dlp", "--cookies-from-browser", browser, "-j", "about:blank"],
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, encoding="utf-8", errors="replace",
                     env=os.environ,
                 )
-                out, _ = proc.communicate(timeout=15)
-                if proc.returncode == 0 and "Available formats" in out:
-                    self.cookies_status.config(text=f"✓ {browser} cookies OK", foreground="#6a9955")
-                    self._log(f"✓ {browser} cookies 可读\n", "success")
-                elif "could not find" in out.lower():
-                    self.cookies_status.config(text=f"✗ 找不到 {browser} cookies (关闭浏览器后重试)", foreground="#f44747")
-                    self._log(f"✗ 无法读取 {browser} cookies。请关闭所有 {browser} 窗口后重试。\n", "error")
+                out, _ = proc.communicate(timeout=8)
+                out_lower = out.lower()
+
+                if "extracting cookies" in out_lower and "extracted" in out_lower:
+                    cnt = ""
+                    for w in out_lower.split():
+                        if w.isdigit() and int(w) > 10:
+                            cnt = w; break
+                    self._log(f"  yt-dlp 提取: {cnt} cookies\n" if cnt else "  yt-dlp 提取成功\n", "success")
+                    self.cookies_status.config(text=f"{browser} cookies OK", foreground="#6a9955")
+                elif "could not find" in out_lower or "permission" in out_lower:
+                    self.cookies_status.config(text=f"{browser} 已锁定", foreground="#ce9178")
+                    self._log("  cookies 被浏览器锁定。关闭浏览器后重试，或改用 cookies 文件。\n", "warn")
                 else:
-                    self.cookies_status.config(text=f"✗ {browser} 读取失败", foreground="#f44747")
-                    self._log(out[:500] + "\n", "dim")
+                    self.cookies_status.config(text=f"{browser} 异常", foreground="#ce9178")
+                    self._log(out[:400] + "\n", "dim")
             except subprocess.TimeoutExpired:
                 proc.kill()
-                self.cookies_status.config(text="✗ 测试超时", foreground="#f44747")
+                self.cookies_status.config(text=f"{browser} 超时 (文件存在)", foreground="#ce9178")
+                self._log("  网络超时，但本地 cookies 文件存在，下载时自动重试。\n", "warn")
             except Exception as e:
                 self.cookies_status.config(text=f"✗ 测试失败: {e}", foreground="#f44747")
 
@@ -312,6 +345,7 @@ def main():
             if self.process and self.process.poll() is None:
                 self.process.terminate()
                 self._log("\n[已停止]\n", "warn")
+                cleanup_temp_files(self.output_var.get().strip())
                 self._on_done(1, "已停止")
 
         def _on_done(self, exit_code, msg=""):
@@ -322,24 +356,49 @@ def main():
             self.root.after(0, _done)
 
         def _download_worker(self, url, platform, output_dir):
+            # 自动检测并标准化抖音精选 URL
+            normalized = normalize_douyin_url(url)
+            if normalized != url:
+                self._log(f"抖音 URL 标准化: {normalized}\n", "info")
+                url = normalized
+
             high, fallback = get_platform_presets(platform, self.config)
+
+            # Round 1: 高清 (cookies)
             self._log("--- Round 1: 高清 (cookies) ---\n", "info")
             rc = self._run(url, output_dir, high, use_cookies=True)
             if rc == 0:
                 self._log("\n高清下载成功\n", "success")
+                cleanup_temp_files(output_dir)
                 self._on_done(0)
                 return
+
+            # cookies 错误 + 自动重试
+            import time
+            self._log("\n[!] Cookies 可能被浏览器锁定，2秒后重试...\n", "warn")
+            self._log("  建议: 关闭 Chrome 后重试，或在 config.json 中设置 cookies_file\n", "dim")
+            time.sleep(2)
+            self._log("--- Round 1 重试: 高清 (cookies) ---\n", "info")
+            rc = self._run(url, output_dir, high, use_cookies=True)
+            if rc == 0:
+                self._log("\n重试成功，高清下载完成\n", "success")
+                cleanup_temp_files(output_dir)
+                self._on_done(0)
+                return
+
             if fallback is None:
                 self._log(f"\n{platform} 需登录且cookies不可用，无回退。\n", "error")
+                cleanup_temp_files(output_dir)
                 self._on_done(rc)
                 return
-            self._log(f"\n高清失败(exit={rc})，回退低清...\n", "warn")
+            self._log(f"\n高清仍失败(exit={rc})，回退低清 (无需cookies)...\n", "warn")
             self._log("--- Round 2: 低清 (无cookies) ---\n", "info")
             rc2 = self._run(url, output_dir, fallback, use_cookies=False)
             if rc2 == 0:
                 self._log("\n低清下载成功（已降级）\n", "success")
             else:
                 self._log(f"\n低清也失败(exit={rc2})\n", "error")
+            cleanup_temp_files(output_dir)
             self._on_done(rc2)
 
         def _run(self, url, output_dir, opts, use_cookies):
