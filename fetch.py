@@ -91,9 +91,9 @@ PLATFORM_PRESETS = {
 
 # ── 配置加载 ──────────────────────────────────────────────
 def normalize_douyin_url(url):
-    """将抖音精选 /jingxuan?modal_id= 格式转换为 /video/ 格式"""
+    """将抖音 /jingxuan 或 /user/self 等?modal_id= 格式转换为 /video/ 格式"""
     import re
-    m = re.search(r'douyin\.com/jingxuan\?.*modal_id=(\d+)', url)
+    m = re.search(r'douyin\.com/\S*\?.*modal_id=(\d+)', url)
     if m:
         return f"https://www.douyin.com/video/{m.group(1)}"
     return url
