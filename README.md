@@ -11,13 +11,19 @@
 ```bash
 # B站
 python fetch.py "https://www.bilibili.com/video/BV1xx411c7mD" -p bilibili
+```
 
+```bash
 # YouTube
 python fetch.py "https://www.youtube.com/watch?v=mcTAHffEkIw" -p youtube
+```
 
+```bash
 # X / Twitter
 python fetch.py "https://x.com/xxx/status/123456" -p twitter
+```
 
+```bash
 # 抖音 / 抖音精选
 python fetch.py "https://www.douyin.com/video/7649969359930982011" -p douyin
 python fetch.py "https://www.douyin.com/jingxuan?modal_id=7649969359930982011" -p douyin
