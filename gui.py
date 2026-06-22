@@ -5,8 +5,11 @@ Start: python gui.py
 """
 
 import os, sys, traceback, subprocess, threading, tempfile as tmpmod
+from _logger import log, set_log_file, close as close_log
 
 def _crash_log(exc_info):
+    try: log("error", "GUI crash", exc_info=True)
+    except: pass
     log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui_error.log")
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(f"\n{'='*60}\n")
@@ -258,6 +261,7 @@ def main():
             self._log(f"Platform: {plat}\nOutput: {out}\nURL: {url}\n\n", "info")
             self.dl_btn.config(state="disabled"); self.stop_btn.config(state="normal")
             self.status_var.set("Downloading..."); self.process = None
+            log("info", f"GUI download start: url={url[:80]} platform={plat} output={out}")
             threading.Thread(target=self._worker, args=(url, plat, out), daemon=True).start()
 
         def _stop(self):
@@ -382,7 +386,11 @@ def main():
             return rc
 
     print("Starting Video Fetcher GUI...")
+    set_log_file("gui")
+    log("info", "GUI starting")
     root = tk.Tk(); app = VideoFetcherGUI(root); root.mainloop()
+    log("info", "GUI closed")
+    close_log()
     print("GUI closed.")
 
 if __name__ == "__main__":

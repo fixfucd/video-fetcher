@@ -5,6 +5,7 @@ import argparse, json, os, shutil, sqlite3, subprocess, sys, tempfile, time
 from pathlib import Path
 try: from _cookie_crypto import export_cookies as _native_export
 except ImportError: _native_export = None
+from _logger import log, set_log_file, close as close_log
 
 BROWSER_CONFIG = {
     "chrome": {"yt_name":"chrome","native":True,"label":"Chrome","engine":"chromium","base_dirs":["{localappdata}/Google/Chrome/User Data"],"cookies_paths":["{profile}/Network/Cookies","{profile}/Cookies"],"priority":1},
@@ -200,6 +201,7 @@ def _try_browser(url, output_dir, high_opts, config, browser_key, start_time, ex
     cfg = BROWSER_CONFIG.get(browser_key,{})
     label = cfg.get("label", browser_key)
 
+    log("debug", f"try browser: {browser_key} (label={label})")
     # Step 0: zero-dep native export (_cookie_crypto, ctypes DPAPI)
     if _native_export:
         tmp = os.path.join(tempfile.gettempdir(), f"vf_native_{browser_key}_cookies.txt")
@@ -255,6 +257,7 @@ def fetch(url, platform="generic", output_dir=None, config_path=None, extra_args
     os.makedirs(output_dir, exist_ok=True)
     high, fallback = get_platform_presets(platform, config)
     start_time = time.time()
+    log("info", f"fetch start: url={url[:80]} platform={platform} output={output_dir}")
 
     installed = detect_installed_browsers()
     available = [k for k,v in installed.items() if v["installed"]]
@@ -312,7 +315,8 @@ def fetch(url, platform="generic", output_dir=None, config_path=None, extra_args
     return proc.returncode
 
 def main():
-    p = argparse.ArgumentParser(description="video-fetcher", epilog="bc3 > yt-dlp DPAPI > LQ fallback")
+    set_log_file("fetch")
+    p = argparse.ArgumentParser(description="video-fetcher", epilog="native > bc3 > yt-dlp DPAPI > LQ fallback")
     p.add_argument("url"); p.add_argument("-p","--platform",choices=list(PLATFORM_PRESETS),default="generic")
     p.add_argument("-o","--output-dir",default=None); p.add_argument("-c","--config",default=None)
     p.add_argument("--list-browsers",action="store_true"); p.add_argument("--extra",nargs="*",default=[])
@@ -323,8 +327,17 @@ def main():
             print(f"  {v['label']:12s} {s}")
         print(f"\n  browser_cookie3: {'available' if _has_bc3() else 'NOT INSTALLED'}")
         return 0
-    if not check_tool("yt-dlp"): print("[error] yt-dlp not found"); return 1
-    return fetch(args.url, args.platform, args.output_dir, args.config, args.extra)
+    if not check_tool("yt-dlp"): log("error", "yt-dlp not found"); close_log(); return 1
+    try:
+        rc = fetch(args.url, args.platform, args.output_dir, args.config, args.extra)
+        log("info", f"fetch done: exit={rc}")
+        return rc
+    except Exception:
+        log("error", "unhandled exception", exc_info=True)
+        close_log()
+        raise
+    finally:
+        close_log()
 
 if __name__ == "__main__":
     sys.exit(main())
