@@ -246,7 +246,7 @@ def _try_browser(url, output_dir, high_opts, config, browser_key, start_time, ex
         else: print(f"[video-fetcher] {label} DPAPI FAIL (exit={rc})")
         return False, stderr
 
-    return False, "all methods failed", None
+    return False, "all methods failed"
 
 # ─── main download flow ───
 
