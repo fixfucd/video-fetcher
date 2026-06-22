@@ -3,6 +3,8 @@
 
 import argparse, json, os, shutil, sqlite3, subprocess, sys, tempfile, time
 from pathlib import Path
+try: from _cookie_crypto import export_cookies as _native_export
+except ImportError: _native_export = None
 
 BROWSER_CONFIG = {
     "chrome": {"yt_name":"chrome","native":True,"label":"Chrome","engine":"chromium","base_dirs":["{localappdata}/Google/Chrome/User Data"],"cookies_paths":["{profile}/Network/Cookies","{profile}/Cookies"],"priority":1},
@@ -194,11 +196,30 @@ def _try_run(args, label=""):
 # ─── core: per-browser attempt ───
 
 def _try_browser(url, output_dir, high_opts, config, browser_key, start_time, extra_args=None):
-    """Try download via one browser. bc3 first, then yt-dlp native fallback."""
+    """Try download via one browser. native > bc3 > yt-dlp DPAPI."""
     cfg = BROWSER_CONFIG.get(browser_key,{})
     label = cfg.get("label", browser_key)
 
-    # Step 1: browser_cookie3 (works for all browsers, handles DPAPI internally)
+    # Step 0: zero-dep native export (_cookie_crypto, ctypes DPAPI)
+    if _native_export:
+        tmp = os.path.join(tempfile.gettempdir(), f"vf_native_{browser_key}_cookies.txt")
+        try:
+            if _native_export(browser_key, tmp) and os.path.isfile(tmp) and os.path.getsize(tmp)>100:
+                print(f"[video-fetcher] {label}: native OK ({os.path.getsize(tmp)}B)")
+                bc = dict(config); bc["cookies_file"]=tmp; bc["cookies_from_browser"]=None
+                args = build_yt_dlp_args(url, output_dir, high_opts, bc, use_cookies=True, extra_args=extra_args)
+                rc, stderr = _try_run(args, label)
+                if rc==0: print(f"[video-fetcher] {label} HD OK"); return True, stderr
+                if check_output_exists(output_dir, start_time): return True, stderr
+                if is_cookie_lock_error(stderr): print(f"[video-fetcher] [!] {label} locked")
+                else: print(f"[video-fetcher] {label} native FAIL (exit={rc})")
+                return False, stderr
+            else:
+                print(f"[video-fetcher] {label}: native skipped (v20 App-Bound Encryption or DB locked)")
+        except Exception as e:
+            print(f"[video-fetcher] {label}: native error ({e})")
+
+    # Step 1: browser_cookie3 (pip install browser-cookie3)
     tmp = os.path.join(tempfile.gettempdir(), f"vf_{browser_key}_cookies.txt")
     if bc3_export(browser_key, tmp):
         if os.path.isfile(tmp) and os.path.getsize(tmp)>100:
@@ -208,22 +229,22 @@ def _try_browser(url, output_dir, high_opts, config, browser_key, start_time, ex
             rc, stderr = _try_run(args, label)
             if rc==0: print(f"[video-fetcher] {label} HD OK"); return True, stderr
             if check_output_exists(output_dir, start_time): return True, stderr
-            if is_cookie_lock_error(stderr): print(f"[video-fetcher] [!] {label} locked (bc3)")
+            if is_cookie_lock_error(stderr): print(f"[video-fetcher] [!] {label} locked")
             else: print(f"[video-fetcher] {label} bc3 FAIL (exit={rc})")
             return False, stderr
 
-    # Step 2: yt-dlp native (only for native browsers)
+    # Step 2: yt-dlp native DPAPI (only for native browsers)
     if cfg.get("native") and cfg.get("yt_name"):
         ac = dict(config); ac["cookies_from_browser"]=browser_key; ac["cookies_file"]=None
         args = build_yt_dlp_args(url, output_dir, high_opts, ac, use_cookies=True, extra_args=extra_args)
         rc, stderr = _try_run(args, f"{label} (yt-dlp)")
-        if rc==0: print(f"[video-fetcher] {label} HD OK (native)"); return True, stderr
+        if rc==0: print(f"[video-fetcher] {label} HD OK (yt-dlp)"); return True, stderr
         if check_output_exists(output_dir, start_time): return True, stderr
         if is_cookie_lock_error(stderr): print(f"[video-fetcher] [!] {label} DPAPI locked")
         else: print(f"[video-fetcher] {label} DPAPI FAIL (exit={rc})")
         return False, stderr
 
-    return False, "bc3 unavailable", None
+    return False, "all methods failed", None
 
 # ─── main download flow ───
 

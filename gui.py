@@ -35,7 +35,7 @@ def main():
             find_cookies_file, get_alt_browsers,
             is_cookie_lock_error, detect_installed_browsers,
             detect_browser_profiles, get_available_browsers,
-            _expand_path, _has_bc3, bc3_export,
+            _expand_path, _has_bc3, bc3_export, _native_export,
         )
     except ImportError as e:
         print(f"import failed: {e}", file=sys.stderr)
@@ -155,8 +155,10 @@ def main():
         def _check_env(self):
             if not check_tool("yt-dlp"): self._log("yt-dlp not found. pip install yt-dlp\n", "error"); self.dl_btn.config(state="disabled")
             if not check_tool("ffmpeg"): self._log("ffmpeg not found.\n", "warn")
+            if _native_export: self._log("native cookie crypto: available\n", "success")
+            else: self._log("native cookie crypto: AES backend missing (pip install cryptography)\n", "warn")
             if _has_bc3(): self._log("browser_cookie3: available\n", "success")
-            else: self._log("browser_cookie3: NOT INSTALLED (pip install browser-cookie3)\n", "warn")
+            else: self._log("browser_cookie3: NOT INSTALLED\n", "dim")
 
         def _log(self, text, tag="info"):
             def w():
@@ -326,9 +328,24 @@ def main():
             cleanup_temp_files(out); self._done(rc)
 
         def _try_bc3_then_native(self, url, out, high, bk):
-            """Try bc3 first, then yt-dlp native for one browser."""
+            """Try native > bc3 > yt-dlp DPAPI for one browser."""
             label = BROWSER_CONFIG[bk]["label"]
-            # bc3
+
+            # Step 0: zero-dep native export
+            if _native_export:
+                try:
+                    tmp = os.path.join(tmpmod.gettempdir(), f"vf_native_{bk}_cookies.txt")
+                    if _native_export(bk, tmp) and os.path.isfile(tmp) and os.path.getsize(tmp)>100:
+                        self._log(f"  native OK ({os.path.getsize(tmp)}B)\n", "success")
+                        bc = dict(self.config); bc["cookies_file"]=tmp; bc["cookies_from_browser"]=None
+                        args = build_yt_dlp_args(url, out, high, bc, use_cookies=True)
+                        rc = self._run_with_args(args)
+                        if rc==0: self._log(f"\n{label} HD OK (native)\n", "success"); return True
+                        return False
+                except Exception as e:
+                    self._log(f"  native error: {e}\n", "dim")
+
+            # Step 1: browser_cookie3
             tmp = os.path.join(tmpmod.gettempdir(), f"vf_{bk}_cookies.txt")
             if bc3_export(bk, tmp) and os.path.isfile(tmp) and os.path.getsize(tmp)>100:
                 self._log(f"  bc3 OK ({os.path.getsize(tmp)}B)\n", "success")
@@ -337,10 +354,11 @@ def main():
                 rc = self._run_with_args(args)
                 if rc==0: self._log(f"\n{label} HD OK (bc3)\n", "success"); return True
                 return False
-            # native
+
+            # Step 2: yt-dlp DPAPI
             if BROWSER_CONFIG[bk].get("native"):
                 rc = self._run(url, out, high, use_cookies=True)
-                if rc==0: self._log(f"\n{label} HD OK (native)\n", "success"); return True
+                if rc==0: self._log(f"\n{label} HD OK (yt-dlp)\n", "success"); return True
                 self._log(f"  {label} DPAPI FAIL (exit={rc})\n", "warn")
             return False
 
