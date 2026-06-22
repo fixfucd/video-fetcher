@@ -322,13 +322,15 @@ def main():
 
             if check_output_exists(out, st): cleanup_temp_files(out); self._done(0); return
 
+            log("warn", f"all browser attempts failed, falling back")
             # fallback
             if fallback is None:
-                self._log(f"\n{plat} needs login, abort.\n", "error"); cleanup_temp_files(out); self._done(1); return
+                self._log(f"\n{plat} needs login, abort.\n", "error"); log("error", f"all methods failed for {plat}"); cleanup_temp_files(out); self._done(1); return
             self._log("\n--- LQ fallback ---\n", "warn")
+            log("info", "falling back to low quality")
             rc = self._run(url, out, fallback, use_cookies=False)
-            if rc==0: self._log("\nLQ OK\n", "success")
-            else: self._log(f"\nLQ FAIL ({rc})\n", "error")
+            if rc==0: self._log("\nLQ OK\n", "success"); log("info", "LQ success")
+            else: self._log(f"\nLQ FAIL ({rc})\n", "error"); log("error", f"LQ failed exit={rc}")
             cleanup_temp_files(out); self._done(rc)
 
         def _try_bc3_then_native(self, url, out, high, bk):
@@ -383,6 +385,7 @@ def main():
                 if "[download]" in s and "%" in s: s = s[:140]
                 self._log(f"{s}\n", tag)
             self.process.wait(); rc = self.process.returncode; self.process = None
+            if rc != 0: log("warn", f"yt-dlp exited with code {rc}")
             return rc
 
     print("Starting Video Fetcher GUI...")

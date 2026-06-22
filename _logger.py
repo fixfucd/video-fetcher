@@ -19,9 +19,8 @@ def _get_log_dir():
 
 def set_log_file(name):
     global _LOG_FILE, _LOG_HANDLE
-    if _LOG_HANDLE:
-        try: _LOG_HANDLE.close()
-        except: pass
+    if _LOG_HANDLE and _LOG_FILE:
+        return  # already logging, don't overwrite
     log_dir = _get_log_dir()
     date_str = datetime.now().strftime("%Y%m%d")
     today_file = log_dir / f"{name}_{date_str}.log"
