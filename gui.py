@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
 """
-video-fetcher GUI — 可视化视频下载客户端
-
-启动: python gui.py
+video-fetcher GUI — visual video download client
+Start: python gui.py
 """
 
-import os
-import sys
-import traceback
-import subprocess
-import threading
-
+import os, sys, traceback, subprocess, threading, tempfile as tmpmod
 
 def _crash_log(exc_info):
     log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui_error.log")
@@ -18,25 +12,15 @@ def _crash_log(exc_info):
         f.write(f"\n{'='*60}\n")
         traceback.print_exception(*exc_info, file=f)
     traceback.print_exception(*exc_info)
-    print(f"\n错误日志: {log_path}", file=sys.stderr)
-
+    print(f"\nerror log: {log_path}", file=sys.stderr)
 
 def _check_tkinter():
-    try:
-        import tkinter
-        return True
+    try: import tkinter; return True
     except ImportError:
-        print(
-            "tkinter 不可用。请安装 Python 时勾选 'tcl/tk and IDLE' 选项。",
-            file=sys.stderr,
-        )
-        return False
-
+        print("tkinter not available.", file=sys.stderr); return False
 
 def main():
-    if not _check_tkinter():
-        input("按 Enter 退出...")
-        sys.exit(1)
+    if not _check_tkinter(): input("Press Enter..."); sys.exit(1)
 
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
@@ -45,30 +29,26 @@ def main():
     try:
         from fetch import (
             PLATFORM_PRESETS, BROWSER_CONFIG,
-            load_config, get_platform_presets,
-            build_yt_dlp_args, check_tool, normalize_douyin_url,
+            load_config, get_platform_presets, build_yt_dlp_args,
+            check_tool, normalize_douyin_url,
             cleanup_temp_files, check_output_exists,
-            find_cookies_file, get_browser_cookies_args,
-            get_alt_browsers, is_cookie_lock_error,
-            detect_installed_browsers, detect_browser_profiles,
-            copy_cookies_db, get_available_browsers,
-            _expand_path,
+            find_cookies_file, get_alt_browsers,
+            is_cookie_lock_error, detect_installed_browsers,
+            detect_browser_profiles, get_available_browsers,
+            _expand_path, _has_bc3, bc3_export,
         )
     except ImportError as e:
-        print(f"导入 fetch 模块失败: {e}", file=sys.stderr)
-        print("请确保 fetch.py 与 gui.py 在同一目录。", file=sys.stderr)
-        input("按 Enter 退出...")
-        sys.exit(1)
+        print(f"import failed: {e}", file=sys.stderr)
+        input("Press Enter..."); sys.exit(1)
 
     class VideoFetcherGUI:
         def __init__(self, root):
             self.root = root
             self.root.title("Video Fetcher")
-            self.root.geometry("760x600")
-            self.root.minsize(640, 480)
+            self.root.geometry("760x600"); self.root.minsize(640, 480)
             self.config = load_config()
             self.process = None
-            self._installed_browsers = {}  # 缓存检测结果
+            self._installed_browsers = {}
             self._fix_env()
             self._refresh_browser_detection()
             self._setup_ui()
@@ -77,568 +57,317 @@ def main():
         @staticmethod
         def _fix_env():
             import getpass
-            username = os.environ.get("USERNAME") or getpass.getuser()
-            home = os.environ.get("USERPROFILE") or f"C:\\Users\\{username}"
-            if not os.environ.get("LOCALAPPDATA"):
-                os.environ["LOCALAPPDATA"] = f"{home}\\AppData\\Local"
-            if not os.environ.get("APPDATA"):
-                os.environ["APPDATA"] = f"{home}\\AppData\\Roaming"
+            u = os.environ.get("USERNAME") or getpass.getuser()
+            h = os.environ.get("USERPROFILE") or f"C:\\Users\\{u}"
+            if not os.environ.get("LOCALAPPDATA"): os.environ["LOCALAPPDATA"] = f"{h}\\AppData\\Local"
+            if not os.environ.get("APPDATA"): os.environ["APPDATA"] = f"{h}\\AppData\\Roaming"
 
         def _refresh_browser_detection(self):
-            """重新检测系统中已安装的浏览器。"""
             self._installed_browsers = detect_installed_browsers()
 
         def _setup_ui(self):
             main = ttk.Frame(self.root, padding=12)
             main.pack(fill="both", expand=True)
 
-            ttk.Label(main, text="视频 URL").pack(anchor="w")
-            url_frame = ttk.Frame(main)
-            url_frame.pack(fill="x", pady=(2, 8))
+            ttk.Label(main, text="Video URL").pack(anchor="w")
+            uf = ttk.Frame(main); uf.pack(fill="x", pady=(2,8))
             self.url_var = tk.StringVar()
-            self.url_entry = ttk.Entry(url_frame, textvariable=self.url_var, font=("Consolas", 10))
+            self.url_entry = ttk.Entry(uf, textvariable=self.url_var, font=("Consolas",10))
             self.url_entry.pack(fill="x", expand=True)
-            self.url_entry.bind("<Button-3>", self._on_right_click_url)
+            self.url_entry.bind("<Button-3>", self._right_click_url)
 
-            # ── Cookies 配置 ──
-            header_row = ttk.Frame(main)
-            header_row.pack(fill="x", pady=(8, 0))
-            ttk.Label(header_row, text="Cookies 来源 (高清需要)").pack(side="left")
-            ttk.Button(header_row, text="⟳ 刷新检测", command=self._on_refresh_browsers,
-                       width=10).pack(side="right")
+            hr = ttk.Frame(main); hr.pack(fill="x", pady=(8,0))
+            ttk.Label(hr, text="Cookies (HD needed)").pack(side="left")
+            ttk.Button(hr, text="Refresh", command=self._on_refresh, width=8).pack(side="right")
 
-            cookies_row = ttk.Frame(main)
-            cookies_row.pack(fill="x", pady=(2, 8))
-
-            self.cookies_browser_var = tk.StringVar(
-                value=self.config.get("cookies_from_browser", "")
-            )
-            # 下拉：已安装浏览器 + 全部浏览器
-            self._build_browser_dropdown(cookies_row)
-
-            ttk.Label(cookies_row, text="或").pack(side="left", padx=4)
-            self.cookies_file_var = tk.StringVar(
-                value=self.config.get("cookies_file", "")
-            )
-            file_entry = ttk.Entry(cookies_row, textvariable=self.cookies_file_var, width=30)
-            file_entry.pack(side="left", padx=4)
-            ttk.Button(cookies_row, text="浏览...", command=self._browse_cookies_file, width=6).pack(side="left")
-            self.cookies_status = ttk.Label(cookies_row, text="", foreground="gray")
+            cr = ttk.Frame(main); cr.pack(fill="x", pady=(2,8))
+            self.cookies_browser_var = tk.StringVar(value=self.config.get("cookies_from_browser",""))
+            self._build_dropdown(cr)
+            ttk.Label(cr, text="or").pack(side="left", padx=4)
+            self.cookies_file_var = tk.StringVar(value=self.config.get("cookies_file",""))
+            ttk.Entry(cr, textvariable=self.cookies_file_var, width=30).pack(side="left", padx=4)
+            ttk.Button(cr, text="Browse...", command=self._browse_file, width=6).pack(side="left")
+            self.cookies_status = ttk.Label(cr, text="", foreground="gray")
             self.cookies_status.pack(side="left", padx=8)
-            ttk.Button(cookies_row, text="测试", command=self._test_cookies, width=4).pack(side="left")
+            ttk.Button(cr, text="Test", command=self._test_cookies, width=4).pack(side="left")
             self._update_cookies_status()
 
-            # 已安装浏览器状态显示行
-            self.browser_status_label = ttk.Label(main, text="", foreground="gray")
-            self.browser_status_label.pack(anchor="w", pady=(0, 4))
-            self._update_browser_status_bar()
+            self.browser_bar = ttk.Label(main, text="", foreground="gray")
+            self.browser_bar.pack(anchor="w", pady=(0,4))
+            self._update_browser_bar()
 
-            row = ttk.Frame(main)
-            row.pack(fill="x", pady=4)
-            ttk.Label(row, text="平台").pack(side="left")
+            row = ttk.Frame(main); row.pack(fill="x", pady=4)
+            ttk.Label(row, text="Platform").pack(side="left")
             self.platform_var = tk.StringVar(value="douyin")
-            cb = ttk.Combobox(row, textvariable=self.platform_var,
-                              values=list(PLATFORM_PRESETS.keys()), state="readonly", width=10)
-            cb.pack(side="left", padx=6)
-            cb.bind("<<ComboboxSelected>>", self._on_platform_change)
+            ttk.Combobox(row, textvariable=self.platform_var, values=list(PLATFORM_PRESETS),
+                         state="readonly", width=10).pack(side="left", padx=6)
+            ttk.Label(row, text="Output").pack(side="left", padx=(12,0))
+            self.output_var = tk.StringVar(value=self.config.get("output_dir", os.path.join(os.getcwd(),"downloads")))
+            ttk.Entry(row, textvariable=self.output_var, font=("Consolas",9)).pack(side="left", fill="x", expand=True, padx=4)
+            ttk.Button(row, text="Browse...", command=self._browse_output, width=6).pack(side="left")
 
-            ttk.Label(row, text="输出目录").pack(side="left", padx=(12, 0))
-            self.output_var = tk.StringVar(
-                value=self.config.get("output_dir", os.path.join(os.getcwd(), "downloads"))
-            )
-            ttk.Entry(row, textvariable=self.output_var, font=("Consolas", 9)).pack(
-                side="left", fill="x", expand=True, padx=4)
-            ttk.Button(row, text="浏览...", command=self._browse_output, width=6).pack(side="left")
+            self.strat_label = ttk.Label(main, foreground="gray",
+                text="Strategy: bc3 > yt-dlp DPAPI > multi-browser > LQ fallback")
+            self.strat_label.pack(anchor="w", pady=(4,6))
 
-            self.strategy_label = ttk.Label(main, foreground="gray",
-                text="策略: 自动检测浏览器 → DB拷贝绕过锁 → 多浏览器回退 → 低清兜底")
-            self.strategy_label.pack(anchor="w", pady=(4, 6))
-
-            btn_frame = ttk.Frame(main)
-            btn_frame.pack(fill="x", pady=4)
-            self.download_btn = ttk.Button(btn_frame, text="开始下载", command=self._start_download)
-            self.download_btn.pack(side="left", padx=(0, 8))
-            self.stop_btn = ttk.Button(btn_frame, text="停止", command=self._stop_download, state="disabled")
+            bf = ttk.Frame(main); bf.pack(fill="x", pady=4)
+            self.dl_btn = ttk.Button(bf, text="Download", command=self._start)
+            self.dl_btn.pack(side="left", padx=(0,8))
+            self.stop_btn = ttk.Button(bf, text="Stop", command=self._stop, state="disabled")
             self.stop_btn.pack(side="left")
-            self.status_var = tk.StringVar(value="就绪")
-            ttk.Label(btn_frame, textvariable=self.status_var, foreground="gray").pack(side="right")
+            self.status_var = tk.StringVar(value="Ready")
+            ttk.Label(bf, textvariable=self.status_var, foreground="gray").pack(side="right")
 
-            log_frame = ttk.Frame(main)
-            log_frame.pack(fill="both", expand=True, pady=(8, 0))
-            self.log_text = tk.Text(log_frame, wrap="word", state="disabled",
-                font=("Consolas", 9), bg="#1e1e1e", fg="#d4d4d4",
-                relief="flat", borderwidth=0, padx=8, pady=6)
-            scrollbar = ttk.Scrollbar(log_frame, command=self.log_text.yview)
-            self.log_text.configure(yscrollcommand=scrollbar.set)
-            self.log_text.pack(side="left", fill="both", expand=True)
-            scrollbar.pack(side="right", fill="y")
+            lf = ttk.Frame(main); lf.pack(fill="both", expand=True, pady=(8,0))
+            self.log = tk.Text(lf, wrap="word", state="disabled", font=("Consolas",9),
+                               bg="#1e1e1e", fg="#d4d4d4", relief="flat", borderwidth=0, padx=8, pady=6)
+            sb = ttk.Scrollbar(lf, command=self.log.yview)
+            self.log.configure(yscrollcommand=sb.set)
+            self.log.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
+            for t,c in [("info","#569cd6"),("success","#6a9955"),("warn","#ce9178"),("error","#f44747"),("dim","#808080")]:
+                self.log.tag_configure(t, foreground=c)
 
-            for tag, color in [("info", "#569cd6"), ("success", "#6a9955"),
-                               ("warn", "#ce9178"), ("error", "#f44747"), ("dim", "#808080")]:
-                self.log_text.tag_configure(tag, foreground=color)
+        def _build_dropdown(self, parent):
+            ik = [k for k,v in self._installed_browsers.items() if v["installed"]]
+            ak = sorted(BROWSER_CONFIG, key=lambda k: BROWSER_CONFIG[k]["priority"])
+            ok = [k for k in ak if k not in ik]
+            self._browser_combo = ttk.Combobox(parent, textvariable=self.cookies_browser_var,
+                                                values=ik+ok, width=10)
+            self._browser_combo.pack(side="left")
+            self._browser_combo.bind("<<ComboboxSelected>>", self._on_cookies_change)
 
-        def _build_browser_dropdown(self, parent):
-            """构建浏览器下拉列表，标注安装状态。"""
-            # 已安装的排前面
-            installed_keys = [k for k, v in self._installed_browsers.items() if v["installed"]]
-            all_keys = sorted(BROWSER_CONFIG.keys(), key=lambda k: BROWSER_CONFIG[k]["priority"])
-            other_keys = [k for k in all_keys if k not in installed_keys]
-
-            display_values = []
-            for k in installed_keys:
-                v = self._installed_browsers[k]
-                display_values.append(f"{k} | {v['label']} ✓")
-            for k in other_keys:
-                cfg = BROWSER_CONFIG[k]
-                display_values.append(f"{k} | {cfg['label']}")
-
-            cb = ttk.Combobox(parent, textvariable=self.cookies_browser_var,
-                              values=[k for k in installed_keys + other_keys], width=10)
-            cb.pack(side="left")
-            cb.bind("<<ComboboxSelected>>", self._on_cookies_change)
-            self._browser_combo = cb
-
-        def _update_browser_status_bar(self):
-            """更新底部浏览器状态栏。"""
-            installed = [k for k, v in self._installed_browsers.items() if v["installed"]]
-            if installed:
-                parts = []
-                for k in installed:
-                    v = self._installed_browsers[k]
-                    parts.append(f"{v['label']}({v['profiles']}P)")
-                self.browser_status_label.config(
-                    text=f"已检测: {', '.join(parts)}", foreground="#6a9955")
+        def _update_browser_bar(self):
+            inst = [k for k,v in self._installed_browsers.items() if v["installed"]]
+            if inst:
+                parts = [f"{BROWSER_CONFIG[k]['label']}({self._installed_browsers[k]['profiles']}P)" for k in inst]
+                self.browser_bar.config(text=f"Detected: {', '.join(parts)}", foreground="#6a9955")
             else:
-                self.browser_status_label.config(
-                    text="未检测到已安装浏览器", foreground="#ce9178")
+                self.browser_bar.config(text="No browsers detected", foreground="#ce9178")
 
-        def _on_refresh_browsers(self):
-            """手动刷新浏览器检测。"""
-            self._log("正在重新检测浏览器...\n", "info")
+        def _on_refresh(self):
+            self._log("Refreshing browser detection...\n", "info")
             self._refresh_browser_detection()
-            # 重建下拉
-            self._build_browser_dropdown(self.cookies_browser_var.master)
-            self._update_browser_status_bar()
+            self._build_dropdown(self.cookies_browser_var.master)
+            self._update_browser_bar()
             self._update_cookies_status()
-            self._log("检测完成。\n", "success")
+            self._log("Done.\n", "success")
 
         def _check_env(self):
-            if not check_tool("yt-dlp"):
-                self._log("未找到 yt-dlp。pip install yt-dlp\n", "error")
-                self.download_btn.config(state="disabled")
-            if not check_tool("ffmpeg"):
-                self._log("未找到 ffmpeg。部分视频可能无法合并。\n", "warn")
+            if not check_tool("yt-dlp"): self._log("yt-dlp not found. pip install yt-dlp\n", "error"); self.dl_btn.config(state="disabled")
+            if not check_tool("ffmpeg"): self._log("ffmpeg not found.\n", "warn")
+            if _has_bc3(): self._log("browser_cookie3: available\n", "success")
+            else: self._log("browser_cookie3: NOT INSTALLED (pip install browser-cookie3)\n", "warn")
 
         def _log(self, text, tag="info"):
-            def _write():
-                self.log_text.configure(state="normal")
-                self.log_text.insert("end", text, tag)
-                self.log_text.see("end")
-                self.log_text.configure(state="disabled")
-            self.root.after(0, _write)
+            def w():
+                self.log.configure(state="normal"); self.log.insert("end", text, tag)
+                self.log.see("end"); self.log.configure(state="disabled")
+            self.root.after(0, w)
 
         def _clear_log(self):
-            def _clear():
-                self.log_text.configure(state="normal")
-                self.log_text.delete("1.0", "end")
-                self.log_text.configure(state="disabled")
-            self.root.after(0, _clear)
+            def c():
+                self.log.configure(state="normal"); self.log.delete("1.0","end")
+                self.log.configure(state="disabled")
+            self.root.after(0, c)
 
         def _browse_output(self):
-            path = filedialog.askdirectory(title="选择下载目录")
-            if path:
-                self.output_var.set(path)
+            p = filedialog.askdirectory(title="Select output directory")
+            if p: self.output_var.set(p)
 
-        def _on_right_click_url(self, event):
-            menu = tk.Menu(self.root, tearoff=0)
-            menu.add_command(label="粘贴", command=self._paste_url)
+        def _browse_file(self):
+            p = filedialog.askopenfilename(title="Select cookies.txt", filetypes=[("Cookies","*.txt"),("All","*.*")])
+            if p: self.cookies_file_var.set(p); self._save_config(); self._update_cookies_status()
+
+        def _right_click_url(self, event):
+            m = tk.Menu(self.root, tearoff=0); m.add_command(label="Paste", command=self._paste)
+            try: m.tk_popup(event.x_root, event.y_root)
+            finally: m.grab_release()
+
+        def _paste(self):
             try:
-                menu.tk_popup(event.x_root, event.y_root)
-            finally:
-                menu.grab_release()
+                t = self.root.clipboard_get().strip()
+                if t: self.url_var.set(t)
+            except Exception: pass
 
-        def _paste_url(self):
-            try:
-                text = self.root.clipboard_get().strip()
-                if text:
-                    self.url_var.set(text)
-            except Exception:
-                pass
+        def _on_cookies_change(self, event=None): self._save_config(); self._update_cookies_status()
 
-        def _on_cookies_change(self, event=None):
-            self._save_cookies_config()
-            self._update_cookies_status()
-
-        def _browse_cookies_file(self):
-            path = filedialog.askopenfilename(
-                title="选择 cookies.txt 文件",
-                filetypes=[("Cookies 文件", "*.txt"), ("所有文件", "*.*")]
-            )
-            if path:
-                self.cookies_file_var.set(path)
-                self._save_cookies_config()
-                self._update_cookies_status()
-
-        def _save_cookies_config(self):
-            browser = self.cookies_browser_var.get().strip() or None
-            file_path = self.cookies_file_var.get().strip() or None
-            self.config["cookies_from_browser"] = browser
-            self.config["cookies_file"] = file_path
-            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        def _save_config(self):
+            self.config["cookies_from_browser"] = self.cookies_browser_var.get().strip() or None
+            self.config["cookies_file"] = self.cookies_file_var.get().strip() or None
             try:
                 import json
-                with open(config_path, "w", encoding="utf-8") as f:
+                with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),"config.json"),"w",encoding="utf-8") as f:
                     json.dump(self.config, f, ensure_ascii=False, indent=2)
-            except Exception:
-                pass
+            except Exception: pass
 
         def _update_cookies_status(self):
-            browser = self.cookies_browser_var.get().strip()
-            file_path = self.cookies_file_var.get().strip()
-            if file_path:
-                if os.path.isfile(file_path):
-                    self.cookies_status.config(
-                        text=f"✓ 文件就绪 ({os.path.basename(file_path)})", foreground="#6a9955")
-                else:
-                    self.cookies_status.config(text="✗ 文件不存在", foreground="#f44747")
-            elif browser:
-                cfg = BROWSER_CONFIG.get(browser, {})
-                label = cfg.get("label", browser)
-                is_installed = self._installed_browsers.get(browser, {}).get("installed", False)
-                if is_installed:
-                    self.cookies_status.config(
-                        text=f"从 {label} 读取 (已安装)", foreground="#ce9178")
-                else:
-                    self.cookies_status.config(
-                        text=f"从 {label} 读取 (未检测到)", foreground="#ce9178")
-            else:
-                self.cookies_status.config(text="未配置 (仅低清)", foreground="#808080")
+            b = self.cookies_browser_var.get().strip()
+            fp = self.cookies_file_var.get().strip()
+            if fp:
+                if os.path.isfile(fp): self.cookies_status.config(text=f"OK ({os.path.basename(fp)})", foreground="#6a9955")
+                else: self.cookies_status.config(text="File not found", foreground="#f44747")
+            elif b:
+                label = BROWSER_CONFIG.get(b,{}).get("label", b)
+                inst = self._installed_browsers.get(b,{}).get("installed", False)
+                self.cookies_status.config(text=f"{label} ({'installed' if inst else 'not found'})", foreground="#ce9178")
+            else: self.cookies_status.config(text="none (LQ only)", foreground="#808080")
 
         def _test_cookies(self):
-            """测试浏览器 cookies，含 DB 拷贝测试。"""
-            browser = self.cookies_browser_var.get().strip()
-            if not browser:
-                messagebox.showinfo("提示", "请先选择浏览器。")
-                return
-            cfg = BROWSER_CONFIG.get(browser, {})
-            label = cfg.get("label", browser)
-            self.cookies_status.config(text=f"检查 {label}...", foreground="#808080")
-            self._log(f"=== cookies 检查: {label} ===\n", "info")
+            b = self.cookies_browser_var.get().strip()
+            if not b: messagebox.showinfo("Info", "Select a browser first."); return
+            cfg = BROWSER_CONFIG.get(b,{}); label = cfg.get("label", b)
+            self.cookies_status.config(text=f"Testing {label}...", foreground="#808080")
+            self._log(f"=== Test: {label} ===\n", "info")
 
-            # 1. 本地文件检查（含多 Profile）
+            # profiles
             found = False
-            profiles = detect_browser_profiles(browser)
-            if profiles:
-                self._log(f"  检测到 {len(profiles)} 个 Profile:\n", "info")
-                for prof_dir, prof_name in profiles:
-                    for cookie_tmpl in cfg.get("cookies_paths", []):
-                        path = _expand_path(cookie_tmpl, prof_dir)
-                        if os.path.isfile(path):
-                            self._log(f"    {prof_name}: {path} ({os.path.getsize(path)} bytes)\n", "success")
-                            found = True
-            elif cfg.get("engine") == "gecko":
-                db_path, prof_name = find_cookies_file(browser)
-                if db_path:
-                    self._log(f"  本地文件: {db_path} ({os.path.getsize(db_path)} bytes)\n", "success")
-                    found = True
+            profs = detect_browser_profiles(b)
+            if profs:
+                self._log(f"  {len(profs)} profile(s):\n", "info")
+                for pd, pn in profs:
+                    for ct in cfg.get("cookies_paths",[]):
+                        p = _expand_path(ct, pd)
+                        if os.path.isfile(p): self._log(f"    {pn}: {p} ({os.path.getsize(p)}B)\n", "success"); found = True
+            elif cfg.get("engine")=="gecko":
+                dp,_ = find_cookies_file(b)
+                if dp: self._log(f"  {dp} ({os.path.getsize(dp)}B)\n", "success"); found = True
+            if not found: self._log("  no cookies file found\n", "dim"); self.cookies_status.config(text=f"{label} not installed", foreground="#ce9178"); return
 
-            if not found:
-                self._log(f"  (未找到 {label} cookies 文件)\n", "dim")
-                self.cookies_status.config(text=f"{label} 未安装", foreground="#ce9178")
-                return
-
-            # 2. DB 拷贝测试
-            self._log("  测试 cookies DB 拷贝 (绕过锁)...\n", "dim")
-            tmp_path = copy_cookies_db(browser)
-            if tmp_path:
-                self._log(f"  DB 拷贝成功: {os.path.basename(tmp_path)} ({os.path.getsize(tmp_path)} bytes)\n", "success")
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
+            # bc3 test
+            self._log("  testing bc3 export...\n", "dim")
+            tmp = os.path.join(tmpmod.gettempdir(), f"vf_test_{b}_cookies.txt")
+            if bc3_export(b, tmp):
+                sz = os.path.getsize(tmp)
+                self._log(f"  bc3 OK ({sz}B)\n", "success")
+                self.cookies_status.config(text=f"{label} bc3 OK", foreground="#6a9955")
             else:
-                self._log("  DB 拷贝失败 (浏览器可能正在运行，下载时会重试)\n", "warn")
+                self._log("  bc3 not available\n", "warn")
+                self.cookies_status.config(text=f"{label} found (bc3 not installed)", foreground="#ce9178")
 
-            # 3. yt-dlp 测试
-            try:
-                if cfg.get("native") and cfg.get("yt_name"):
-                    cmd = ["yt-dlp", "--cookies-from-browser", cfg["yt_name"], "-j", "about:blank"]
-                else:
-                    cookies_path, _ = find_cookies_file(browser)
-                    if not cookies_path:
-                        self._log("  cookies 文件未找到\n", "warn")
-                        return
-                    cmd = ["yt-dlp", "--cookies", cookies_path, "-j", "about:blank"]
-
-                proc = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, encoding="utf-8", errors="replace", env=os.environ)
-                out, _ = proc.communicate(timeout=8)
-                out_lower = out.lower()
-
-                if "extracting cookies" in out_lower and "extracted" in out_lower:
-                    cnt = ""
-                    for w in out_lower.split():
-                        if w.isdigit() and int(w) > 10:
-                            cnt = w; break
-                    self._log(f"  yt-dlp 提取: {cnt} cookies\n" if cnt else "  yt-dlp 提取成功\n", "success")
-                    self.cookies_status.config(text=f"{label} cookies OK", foreground="#6a9955")
-                elif any(kw in out_lower for kw in ["could not find", "permission", "locked"]):
-                    self.cookies_status.config(text=f"{label} 已锁定 (DB拷贝可用)", foreground="#ce9178")
-                    self._log("  cookies 被锁定。下载时将自动拷贝 DB 绕过。\n", "warn")
-                else:
-                    self.cookies_status.config(text=f"{label} 异常", foreground="#ce9178")
-                    self._log(out[:400] + "\n", "dim")
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                self.cookies_status.config(text=f"{label} 超时", foreground="#ce9178")
-                self._log("  网络超时，本地文件存在，下载时自动重试。\n", "warn")
-            except Exception as e:
-                self.cookies_status.config(text=f"✗ 测试失败", foreground="#f44747")
-                self._log(f"  {e}\n", "error")
-
-        def _on_platform_change(self, event=None):
-            tips = {
-                "bilibili": "B站: 高清 -> 720p",
-                "youtube": "YouTube: 4K+字幕(web) -> 720p(android)",
-                "twitter": "X: 最高质量(必须cookies)",
-                "generic": "通用: bestvideo+bestaudio -> best",
-            }
-            self.strategy_label.config(text="策略: " + tips.get(self.platform_var.get(), ""))
-
-        def _start_download(self):
+        def _start(self):
             url = self.url_var.get().strip()
-            if not url:
-                messagebox.showwarning("提示", "请输入视频 URL")
-                return
-            platform = self.platform_var.get()
-            output_dir = self.output_var.get().strip()
-            if not output_dir:
-                messagebox.showwarning("提示", "请指定输出目录")
-                return
-            try:
-                os.makedirs(output_dir, exist_ok=True)
-            except OSError as e:
-                messagebox.showerror("错误", f"无法创建输出目录:\n{e}")
-                return
-
+            if not url: messagebox.showwarning("Warning", "Enter a URL"); return
+            plat = self.platform_var.get()
+            out = self.output_var.get().strip()
+            if not out: messagebox.showwarning("Warning", "Select output directory"); return
+            try: os.makedirs(out, exist_ok=True)
+            except OSError as e: messagebox.showerror("Error", str(e)); return
             self._clear_log()
-            self._log(f"平台: {platform}\n输出: {output_dir}\nURL: {url}\n\n", "info")
-            self.download_btn.config(state="disabled")
-            self.stop_btn.config(state="normal")
-            self.status_var.set("下载中...")
-            self.process = None
-            threading.Thread(target=self._download_worker,
-                             args=(url, platform, output_dir), daemon=True).start()
+            self._log(f"Platform: {plat}\nOutput: {out}\nURL: {url}\n\n", "info")
+            self.dl_btn.config(state="disabled"); self.stop_btn.config(state="normal")
+            self.status_var.set("Downloading..."); self.process = None
+            threading.Thread(target=self._worker, args=(url, plat, out), daemon=True).start()
 
-        def _stop_download(self):
+        def _stop(self):
             if self.process and self.process.poll() is None:
-                self.process.terminate()
-                self._log("\n[已停止]\n", "warn")
-                cleanup_temp_files(self.output_var.get().strip())
-                self._on_done(1, "已停止")
+                self.process.terminate(); self._log("\n[Stopped]\n", "warn")
+                cleanup_temp_files(self.output_var.get().strip()); self._done(1, "Stopped")
 
-        def _on_done(self, exit_code, msg=""):
-            def _done():
-                self.download_btn.config(state="normal")
-                self.stop_btn.config(state="disabled")
-                self.status_var.set(msg or ("完成" if exit_code == 0 else f"失败(exit={exit_code})"))
-            self.root.after(0, _done)
+        def _done(self, ec, msg=""):
+            def d():
+                self.dl_btn.config(state="normal"); self.stop_btn.config(state="disabled")
+                self.status_var.set(msg or ("Done" if ec==0 else f"FAIL ({ec})"))
+            self.root.after(0, d)
 
-        def _download_worker(self, url, platform, output_dir):
+        def _worker(self, url, plat, out):
             import time
-
-            normalized = normalize_douyin_url(url)
-            if normalized != url:
-                self._log(f"抖音 URL 标准化: {normalized}\n", "info")
-                url = normalized
-
-            high, fallback = get_platform_presets(platform, self.config)
-            start_time = time.time()
-
-            # 刷新检测
+            url = normalize_douyin_url(url)
+            high, fallback = get_platform_presets(plat, self.config)
+            st = time.time()
             self._refresh_browser_detection()
-            installed = self._installed_browsers
-            available = [k for k, v in installed.items() if v["installed"]]
-            labels = ", ".join(BROWSER_CONFIG[k]["label"] for k in available) if available else "(无)"
-            self._log(f"已安装浏览器: {labels}\n", "info")
+            inst = self._installed_browsers
+            avail = [k for k,v in inst.items() if v["installed"]]
+            self._log(f"Browsers: {', '.join(BROWSER_CONFIG[k]['label'] for k in avail) if avail else '(none)'}\n", "info")
 
-            preferred_browser = self.config.get("cookies_from_browser", "")
-            self._log(f"首选浏览器: {preferred_browser or '(无)'}\n", "info")
+            pref = self.config.get("cookies_from_browser","")
+            self._log(f"Preferred: {pref or '(none)'}\n", "info")
 
-            # cookies 文件
-            cookies_file = self.config.get("cookies_file")
-            if cookies_file and os.path.isfile(cookies_file):
-                self._log(f"使用 cookies 文件: {cookies_file}\n", "info")
-                self._log("--- Round 1: 高清 (cookies 文件) ---\n", "info")
-                rc = self._run(url, output_dir, high, use_cookies=True)
-                if rc == 0:
-                    self._log("\n高清下载成功\n", "success")
-                    cleanup_temp_files(output_dir)
-                    self._on_done(0)
-                    return
-                if check_output_exists(output_dir, start_time):
-                    cleanup_temp_files(output_dir)
-                    self._on_done(0)
-                    return
+            # cookies file
+            cf = self.config.get("cookies_file")
+            if cf and os.path.isfile(cf):
+                self._log(f"Using cookies file: {cf}\n", "info")
+                self._log("--- HD (file) ---\n", "info")
+                rc = self._run(url, out, high, use_cookies=True)
+                if rc==0: self._log("\nHD OK\n", "success"); cleanup_temp_files(out); self._done(0); return
+                if check_output_exists(out, st): cleanup_temp_files(out); self._done(0); return
 
-            tried_browsers = set()
-
-            # 首选浏览器
-            if preferred_browser and installed.get(preferred_browser, {}).get("installed"):
-                tried_browsers.add(preferred_browser)
-                label = BROWSER_CONFIG.get(preferred_browser, {}).get("label", preferred_browser)
-                self._log(f"--- Round 1: 高清 ({label}) ---\n", "info")
-                rc = self._run(url, output_dir, high, use_cookies=True)
-                if rc == 0:
-                    self._log(f"\n{label} 高清下载成功\n", "success")
-                    cleanup_temp_files(output_dir)
-                    self._on_done(0)
-                    return
-                if check_output_exists(output_dir, start_time):
-                    cleanup_temp_files(output_dir)
-                    self._on_done(0)
-                    return
-
-                self._log(f"\n[!] {label} 可能被锁定，等待 2 秒后重试...\n", "warn")
+            tried = set()
+            # preferred
+            if pref and inst.get(pref,{}).get("installed"):
+                tried.add(pref)
+                self._log(f"--- HD ({BROWSER_CONFIG[pref]['label']}) ---\n", "info")
+                ok = self._try_bc3_then_native(url, out, high, pref)
+                if ok: cleanup_temp_files(out); self._done(0); return
                 time.sleep(2)
-                self._log(f"--- 重试: 高清 ({label}) ---\n", "info")
-                rc = self._run(url, output_dir, high, use_cookies=True)
-                if rc == 0:
-                    self._log(f"\n{label} 重试成功\n", "success")
-                    cleanup_temp_files(output_dir)
-                    self._on_done(0)
-                    return
-                if check_output_exists(output_dir, start_time):
-                    cleanup_temp_files(output_dir)
-                    self._on_done(0)
-                    return
+                ok = self._try_bc3_then_native(url, out, high, pref)
+                if ok: cleanup_temp_files(out); self._done(0); return
+            elif pref:
+                self._log(f"'{BROWSER_CONFIG.get(pref,{}).get('label',pref)}' not installed\n", "warn")
 
-            elif preferred_browser:
-                label = BROWSER_CONFIG.get(preferred_browser, {}).get("label", preferred_browser)
-                self._log(f"首选 '{label}' 未安装，直接尝试备用\n", "warn")
+            # alternates
+            alts = [b for b in (get_alt_browsers(pref) if pref else get_available_browsers()) if b not in tried]
+            if alts:
+                self._log(f"\nAlternates: {', '.join(BROWSER_CONFIG[b]['label'] for b in alts)}\n", "info")
+            for b in alts:
+                tried.add(b)
+                self._log(f"--- HD ({BROWSER_CONFIG[b]['label']}) ---\n", "info")
+                ok = self._try_bc3_then_native(url, out, high, b)
+                if ok: cleanup_temp_files(out); self._done(0); return
 
-            # 备用浏览器
-            alt_browsers = [b for b in get_alt_browsers(preferred_browser) if b not in tried_browsers]
-            if alt_browsers:
-                labels = ", ".join(BROWSER_CONFIG[b]["label"] for b in alt_browsers)
-                self._log(f"\n备用浏览器: {labels}\n", "info")
+            if check_output_exists(out, st): cleanup_temp_files(out); self._done(0); return
 
-            for alt_browser in alt_browsers:
-                tried_browsers.add(alt_browser)
-                label = BROWSER_CONFIG.get(alt_browser, {}).get("label", alt_browser)
-                self._log(f"--- 备用: 高清 ({label}) ---\n", "info")
-
-                alt_config = dict(self.config)
-                alt_config["cookies_from_browser"] = alt_browser
-                alt_config["cookies_file"] = None
-                args = build_yt_dlp_args(url, output_dir, high, alt_config, use_cookies=True)
-                rc = self._run_with_args(args)
-                if rc == 0:
-                    self._log(f"\n{label} 高清下载成功\n", "success")
-                    cleanup_temp_files(output_dir)
-                    self._on_done(0)
-                    return
-                if check_output_exists(output_dir, start_time):
-                    cleanup_temp_files(output_dir)
-                    self._on_done(0)
-                    return
-
-            # browser_cookie3 兜底
-            self._log("\n尝试 browser_cookie3 导出...\n", "dim")
-            from fetch import try_browser_cookie3_export
-            import tempfile as tmpmod
-            tmp_cookie_file = os.path.join(tmpmod.gettempdir(), "video_fetcher_cookies.txt")
-            for bk in available:
-                if try_browser_cookie3_export(bk, tmp_cookie_file):
-                    if os.path.isfile(tmp_cookie_file) and os.path.getsize(tmp_cookie_file) > 100:
-                        label = BROWSER_CONFIG[bk]["label"]
-                        self._log(f"browser_cookie3 从 {label} 导出成功\n", "success")
-                        bc3_config = dict(self.config)
-                        bc3_config["cookies_file"] = tmp_cookie_file
-                        bc3_config["cookies_from_browser"] = None
-                        rc = self._run(url, output_dir, high, use_cookies=True)
-                        if rc == 0:
-                            cleanup_temp_files(output_dir)
-                            self._on_done(0)
-                            return
-                    break
-            else:
-                self._log("browser_cookie3 不可用或导出失败\n", "dim")
-
-            if check_output_exists(output_dir, start_time):
-                cleanup_temp_files(output_dir)
-                self._on_done(0)
-                return
-
-            # 低清回退
+            # fallback
             if fallback is None:
-                self._log(f"\n{platform} 需登录且所有 cookies 来源均不可用。\n", "error")
-                cleanup_temp_files(output_dir)
-                self._on_done(1)
-                return
+                self._log(f"\n{plat} needs login, abort.\n", "error"); cleanup_temp_files(out); self._done(1); return
+            self._log("\n--- LQ fallback ---\n", "warn")
+            rc = self._run(url, out, fallback, use_cookies=False)
+            if rc==0: self._log("\nLQ OK\n", "success")
+            else: self._log(f"\nLQ FAIL ({rc})\n", "error")
+            cleanup_temp_files(out); self._done(rc)
 
-            self._log("\n所有浏览器均失败，回退低清...\n", "warn")
-            self._log("--- Round 2: 低清 (无cookies) ---\n", "info")
-            rc2 = self._run(url, output_dir, fallback, use_cookies=False)
-            if rc2 == 0:
-                self._log("\n低清下载成功（已降级）\n", "success")
-            else:
-                self._log(f"\n低清也失败(exit={rc2})\n", "error")
-            cleanup_temp_files(output_dir)
-            self._on_done(rc2)
+        def _try_bc3_then_native(self, url, out, high, bk):
+            """Try bc3 first, then yt-dlp native for one browser."""
+            label = BROWSER_CONFIG[bk]["label"]
+            # bc3
+            tmp = os.path.join(tmpmod.gettempdir(), f"vf_{bk}_cookies.txt")
+            if bc3_export(bk, tmp) and os.path.isfile(tmp) and os.path.getsize(tmp)>100:
+                self._log(f"  bc3 OK ({os.path.getsize(tmp)}B)\n", "success")
+                bc = dict(self.config); bc["cookies_file"]=tmp; bc["cookies_from_browser"]=None
+                args = build_yt_dlp_args(url, out, high, bc, use_cookies=True)
+                rc = self._run_with_args(args)
+                if rc==0: self._log(f"\n{label} HD OK (bc3)\n", "success"); return True
+                return False
+            # native
+            if BROWSER_CONFIG[bk].get("native"):
+                rc = self._run(url, out, high, use_cookies=True)
+                if rc==0: self._log(f"\n{label} HD OK (native)\n", "success"); return True
+                self._log(f"  {label} DPAPI FAIL (exit={rc})\n", "warn")
+            return False
 
-        def _run(self, url, output_dir, opts, use_cookies):
-            args = build_yt_dlp_args(url, output_dir, opts, self.config, use_cookies=use_cookies)
-            return self._run_with_args(args)
+        def _run(self, url, out, opts, use_cookies):
+            return self._run_with_args(build_yt_dlp_args(url, out, opts, self.config, use_cookies=use_cookies))
 
         def _run_with_args(self, args):
             self._log(f"cmd: {' '.join(args)}\n", "dim")
             try:
-                self.process = subprocess.Popen(
-                    args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, encoding="utf-8", errors="replace", bufsize=1,
-                    env=os.environ,
-                )
-            except Exception as e:
-                self._log(f"启动失败: {e}\n", "error")
-                return 1
+                self.process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                                 text=True, encoding="utf-8", errors="replace", bufsize=1, env=os.environ)
+            except Exception as e: self._log(f"Launch failed: {e}\n", "error"); return 1
             for line in iter(self.process.stdout.readline, ""):
-                if self.process is None:
-                    break
+                if self.process is None: break
                 s = line.strip()
-                if not s:
-                    continue
-                if "ERROR" in s:
-                    tag = "error"
-                elif "WARNING" in s:
-                    tag = "warn"
-                elif "[download]" in s and "%" in s:
-                    tag = "info"
-                    s = s[:140]
-                elif "Merger" in s or "Metadata" in s:
-                    tag = "success"
-                else:
-                    tag = "dim"
+                if not s: continue
+                tag = "error" if "ERROR" in s else ("warn" if "WARNING" in s else ("info" if "[download]" in s and "%" in s else ("success" if "Merger" in s or "Metadata" in s else "dim")))
+                if "[download]" in s and "%" in s: s = s[:140]
                 self._log(f"{s}\n", tag)
-            self.process.wait()
-            rc = self.process.returncode
-            self.process = None
+            self.process.wait(); rc = self.process.returncode; self.process = None
             return rc
 
-    print("正在启动 Video Fetcher GUI...")
-    root = tk.Tk()
-    app = VideoFetcherGUI(root)
-    root.mainloop()
-    print("GUI 已关闭。")
-
+    print("Starting Video Fetcher GUI...")
+    root = tk.Tk(); app = VideoFetcherGUI(root); root.mainloop()
+    print("GUI closed.")
 
 if __name__ == "__main__":
-    try:
-        main()
-    except SystemExit:
-        pass
-    except Exception:
-        _crash_log(sys.exc_info())
-        input("\n按 Enter 退出...")
-        sys.exit(1)
+    try: main()
+    except SystemExit: pass
+    except Exception: _crash_log(sys.exc_info()); input("\nPress Enter..."); sys.exit(1)
