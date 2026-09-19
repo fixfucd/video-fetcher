@@ -61,16 +61,23 @@ python gui.py
       └── 低清 (无 cookies) ──成功──▶ 完成 (降级)
              │失败
              ▼
-           报错 (Twitter 无回退)
+           报错 (Twitter 例外见下: 公开推文无 cookies 也可取)
 ```
 
-| 平台 | 高清 | 低清回退 |
-|------|------|----------|
-| B站 | 4K (cookies) | 720p |
-| YouTube | 4K+字幕 (web+cookies) | 720p (android) |
-| 抖音 | bestvideo+bestaudio (cookies) | best |
-| Twitter | 最佳 (cookies) | 无 |
-| 通用 | bestvideo+bestaudio | best |
+| 平台 | 高清 | 低清回退 | 实测 |
+|------|------|----------|------|
+| B站 | 4K (cookies) | 720p | 无 cookies → HTTP 412，**必须** cookies |
+| YouTube | 4K+字幕 (web+cookies) | bestvideo[height<=720] (android,ios) | 无 cookies 实测仅得 360p，见下 |
+| 抖音 | bestvideo+bestaudio (cookies) | best | 需**新鲜** cookies |
+| Twitter | best (cookies) | best (无 cookies) | 公开视频推文免 cookies 可提取，实测与带 cookies 结果一致 |
+| 通用 | bestvideo+bestaudio | best | — |
+
+**Twitter**：公开视频推文无需登录即可提取（实测三条公开推文，无 cookies 与带 cookies
+结果完全相同）。仅受保护/受限内容需要 cookies。
+
+**YouTube 低清档现状**：`player_client=android,ios` 在 yt-dlp 2026.06.09 上已明显退化 ——
+android 端 https 格式被 SABR-only 流媒体实验跳过，ios 端要求 GVS PO Token，
+因此实际只能拿到遗留格式 18（360p）。想要 4K+字幕必须登录 youtube.com 后重新导出 cookies。
 
 ## 浏览器支持
 
@@ -105,11 +112,16 @@ python gui.py
 
 ```
 video-fetcher/
-├── fetch.py         # 核心脚本（检测/下载/回退）
-├── gui.py           # 可视化客户端
-├── config.json      # 配置文件
+├── fetch.py          # 核心脚本（检测/下载/回退）
+├── gui.py            # 可视化客户端
+├── config.json       # 配置文件
 ├── README.md
-├── _test_detect.py  # 浏览器检测验证
-├── _test_import.py  # 导入链验证
-└── _test_gui_import.py
+├── _cdp_cookies.py   # 联想浏览器 cookies 导出（CDP，yt-dlp 不支持该浏览器）
+├── _cookie_crypto.py # 原生 DPAPI + AES-GCM cookies 解密（零依赖）
+├── _logger.py        # 统一日志（自动轮转，目录不可写时降级并告警）
+├── _run_bili_test.py # B站端到端冒烟测试
+├── cookies/          # cookies 导出目录（已在 .gitignore 中，切勿提交）
+└── downloads/        # 默认下载目录（已在 .gitignore 中）
 ```
+
+> **注意**：`cookies/` 下是**在线生效的登录凭据**，已加入 `.gitignore`，请勿提交。
