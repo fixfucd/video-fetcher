@@ -3,8 +3,8 @@
   "_browsers": "支持的浏览器: chrome, edge, lenovo(联想浏览器), brave, opera, firefox。yt-dlp 不原生支持 lenovo，会自动通过 cookies 文件路径读取。",
   "_fallback": "当首选浏览器 cookies 被占用时，自动按优先级回退: chrome → edge → lenovo → brave → opera → firefox。所有浏览器均失败后回退低清。",
   "output_dir": "E:/工作/work2/downloads",
-  "cookies_from_browser": "chrome",
-  "cookies_file": null,
+  "cookies_from_browser": "lenovo",
+  "cookies_file": "C:\\Users\\lenovo\\video-fetcher\\cookies\\slb_fresh.txt",
   "platforms": {
     "bilibili": {
       "format": "bestvideo+bestaudio/best",
@@ -15,10 +15,6 @@
       "merge_output_format": "mp4",
       "sub_langs": "zh-Hans,en",
       "_extractor_note": "默认 web 客户端需 cookies 才能获取4K+字幕。Cookies 不可用时自动切 android+ios 客户端回退720p。"
-    },
-    "douyin": {
-      "format": "bestvideo+bestaudio/best",
-      "merge_output_format": "mp4"
     },
     "douyin": {
       "format": "bestvideo+bestaudio/best",
@@ -36,6 +32,6 @@
   "yt_dlp_global": {
     "concurrent_fragments": 8,
     "no_overwrites": false,
-    "restrict_filenames": true
+    "restrict_filenames": false
   }
 }

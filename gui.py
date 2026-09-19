@@ -38,7 +38,8 @@ def main():
             find_cookies_file, get_alt_browsers,
             is_cookie_lock_error, detect_installed_browsers,
             detect_browser_profiles, get_available_browsers,
-            _expand_path, _has_bc3, bc3_export, _native_export,
+            _expand_path, _has_bc3, bc3_export, _native_export, _has_cdp,
+            detect_platform, _NO_LOGIN_PLATFORMS, check_cookie_login,
         )
     except ImportError as e:
         print(f"import failed: {e}", file=sys.stderr)
@@ -52,6 +53,8 @@ def main():
             self.config = load_config()
             self.process = None
             self._installed_browsers = {}
+            self._last_failed = {}  # (url, platform) -> timestamp
+            self._last_cfg = {}     # (url, platform) -> (browser, cookies_file)
             self._fix_env()
             self._refresh_browser_detection()
             self._setup_ui()
@@ -78,6 +81,7 @@ def main():
             self.url_entry = ttk.Entry(uf, textvariable=self.url_var, font=("Consolas",10))
             self.url_entry.pack(fill="x", expand=True)
             self.url_entry.bind("<Button-3>", self._right_click_url)
+            self.url_var.trace_add("write", self._on_url_change)
 
             hr = ttk.Frame(main); hr.pack(fill="x", pady=(8,0))
             ttk.Label(hr, text="Cookies (HD needed)").pack(side="left")
@@ -92,7 +96,7 @@ def main():
             ttk.Button(cr, text="Browse...", command=self._browse_file, width=6).pack(side="left")
             self.cookies_status = ttk.Label(cr, text="", foreground="gray")
             self.cookies_status.pack(side="left", padx=8)
-            ttk.Button(cr, text="Test", command=self._test_cookies, width=4).pack(side="left")
+            ttk.Button(cr, text="Export & Use", command=self._export_and_use, width=12).pack(side="left")
             self._update_cookies_status()
 
             self.browser_bar = ttk.Label(main, text="", foreground="gray")
@@ -101,7 +105,7 @@ def main():
 
             row = ttk.Frame(main); row.pack(fill="x", pady=4)
             ttk.Label(row, text="Platform").pack(side="left")
-            self.platform_var = tk.StringVar(value="douyin")
+            self.platform_var = tk.StringVar(value="generic")
             ttk.Combobox(row, textvariable=self.platform_var, values=list(PLATFORM_PRESETS),
                          state="readonly", width=10).pack(side="left", padx=6)
             ttk.Label(row, text="Output").pack(side="left", padx=(12,0))
@@ -110,7 +114,7 @@ def main():
             ttk.Button(row, text="Browse...", command=self._browse_output, width=6).pack(side="left")
 
             self.strat_label = ttk.Label(main, foreground="gray",
-                text="Strategy: bc3 > yt-dlp DPAPI > multi-browser > LQ fallback")
+                text="Strategy: native DPAPI/CDP > bc3 > yt-dlp DPAPI > LQ fallback")
             self.strat_label.pack(anchor="w", pady=(4,6))
 
             bf = ttk.Frame(main); bf.pack(fill="x", pady=4)
@@ -134,10 +138,15 @@ def main():
             ik = [k for k,v in self._installed_browsers.items() if v["installed"]]
             ak = sorted(BROWSER_CONFIG, key=lambda k: BROWSER_CONFIG[k]["priority"])
             ok = [k for k in ak if k not in ik]
+            # Destroy old combobox if rebuilding (refresh)
+            if hasattr(self, '_browser_combo') and self._browser_combo is not None:
+                try: self._browser_combo.destroy()
+                except: pass
             self._browser_combo = ttk.Combobox(parent, textvariable=self.cookies_browser_var,
                                                 values=ik+ok, width=10)
             self._browser_combo.pack(side="left")
             self._browser_combo.bind("<<ComboboxSelected>>", self._on_cookies_change)
+            self._dropdown_parent = parent  # remember for refresh
 
         def _update_browser_bar(self):
             inst = [k for k,v in self._installed_browsers.items() if v["installed"]]
@@ -150,7 +159,7 @@ def main():
         def _on_refresh(self):
             self._log("Refreshing browser detection...\n", "info")
             self._refresh_browser_detection()
-            self._build_dropdown(self.cookies_browser_var.master)
+            self._build_dropdown(getattr(self, '_dropdown_parent', self.cookies_browser_var))
             self._update_browser_bar()
             self._update_cookies_status()
             self._log("Done.\n", "success")
@@ -162,6 +171,8 @@ def main():
             else: self._log("native cookie crypto: AES backend missing (pip install cryptography)\n", "warn")
             if _has_bc3(): self._log("browser_cookie3: available\n", "success")
             else: self._log("browser_cookie3: NOT INSTALLED\n", "dim")
+            if _has_cdp(): self._log("CDP fallback (Lenovo lnv20): available\n", "success")
+            else: self._log("CDP fallback (Lenovo lnv20): NOT AVAILABLE\n", "dim")
 
         def _log(self, text, tag="info"):
             def w():
@@ -194,6 +205,24 @@ def main():
                 if t: self.url_var.set(t)
             except Exception: pass
 
+        def _on_url_change(self, *_):
+            """Auto-detect platform when URL changes, override if mismatched."""
+            url = self.url_var.get().strip()
+            if not url:
+                return
+            detected = detect_platform(url)
+            if detected != "generic":
+                current = self.platform_var.get()
+                if current == "generic":
+                    self.platform_var.set(detected)
+                    self._log(f"Auto-detected platform: {detected}\n", "info")
+                elif current != detected:
+                    self.platform_var.set(detected)
+                    self._log(f"⚠ Platform changed: {current} → {detected} (auto-detected from URL)\n", "warn")
+            # Normalize douyin URL
+            if normalize_douyin_url(url) != url:
+                self.url_var.set(normalize_douyin_url(url))
+
         def _on_cookies_change(self, event=None): self._save_config(); self._update_cookies_status()
 
         def _save_config(self):
@@ -217,37 +246,125 @@ def main():
                 self.cookies_status.config(text=f"{label} ({'installed' if inst else 'not found'})", foreground="#ce9178")
             else: self.cookies_status.config(text="none (LQ only)", foreground="#808080")
 
-        def _test_cookies(self):
+        def _export_and_use(self):
+            """Export cookies, save persistently, and activate for downloads."""
             b = self.cookies_browser_var.get().strip()
             if not b: messagebox.showinfo("Info", "Select a browser first."); return
             cfg = BROWSER_CONFIG.get(b,{}); label = cfg.get("label", b)
-            self.cookies_status.config(text=f"Testing {label}...", foreground="#808080")
-            self._log(f"=== Test: {label} ===\n", "info")
+            self.cookies_status.config(text=f"Extracting {label}...", foreground="#808080")
+            self._log(f"=== Cookie Export & Use: {label} ===\n", "info")
 
-            # profiles
+            # Check if cookies database exists
             found = False
             profs = detect_browser_profiles(b)
             if profs:
-                self._log(f"  {len(profs)} profile(s):\n", "info")
+                self._log(f"  {len(profs)} profile(s) detected\n", "dim")
                 for pd, pn in profs:
                     for ct in cfg.get("cookies_paths",[]):
                         p = _expand_path(ct, pd)
-                        if os.path.isfile(p): self._log(f"    {pn}: {p} ({os.path.getsize(p)}B)\n", "success"); found = True
+                        if os.path.isfile(p):
+                            self._log(f"    {pn}: {p} ({os.path.getsize(p):,}B)\n", "dim")
+                            found = True
             elif cfg.get("engine")=="gecko":
                 dp,_ = find_cookies_file(b)
-                if dp: self._log(f"  {dp} ({os.path.getsize(dp)}B)\n", "success"); found = True
-            if not found: self._log("  no cookies file found\n", "dim"); self.cookies_status.config(text=f"{label} not installed", foreground="#ce9178"); return
+                if dp:
+                    self._log(f"  {dp} ({os.path.getsize(dp):,}B)\n", "dim")
+                    found = True
+            if not found:
+                self._log("  No cookies database found\n", "error")
+                self.cookies_status.config(text=f"{label} not installed", foreground="#f44747")
+                return
 
-            # bc3 test
-            self._log("  testing bc3 export...\n", "dim")
-            tmp = os.path.join(tmpmod.gettempdir(), f"vf_test_{b}_cookies.txt")
-            if bc3_export(b, tmp):
-                sz = os.path.getsize(tmp)
-                self._log(f"  bc3 OK ({sz}B)\n", "success")
-                self.cookies_status.config(text=f"{label} bc3 OK", foreground="#6a9955")
-            else:
-                self._log("  bc3 not available\n", "warn")
-                self.cookies_status.config(text=f"{label} found (bc3 not installed)", foreground="#ce9178")
+            # Persistent save directory
+            save_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies")
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = os.path.join(save_dir, f"{b}.txt")
+
+            # Step 1: native DPAPI export (includes CDP fallback for Lenovo lnv20)
+            extracted = False
+            if _native_export:
+                self._log("  → native DPAPI export...\n", "dim")
+                try:
+                    if _native_export(b, save_path) and os.path.isfile(save_path) and os.path.getsize(save_path) > 100:
+                        extracted = True
+                        self._show_cookie_result(save_path, label, method="native DPAPI")
+                    else:
+                        self._log("  native export: no cookies (v20/lnv20 encrypted or locked)\n", "warn")
+                except Exception as e:
+                    self._log(f"  native error: {e}\n", "warn")
+
+            # Step 2: CDP fallback (all Chromium browsers for v20/lnv20 support)
+            if not extracted and cfg.get("engine") == "chromium":
+                self._log(f"  → CDP fallback (launching {label}, ~15s)...\n", "dim")
+                try:
+                    from _cdp_cookies import export_cookies_cdp
+                    if export_cookies_cdp(save_path, browser_key=b):
+                        extracted = True
+                        self._show_cookie_result(save_path, label, method="CDP (browser)")
+                    else:
+                        self._log("  CDP fallback failed\n", "warn")
+                except ImportError:
+                    self._log("  CDP module not available\n", "warn")
+                except Exception as e:
+                    self._log(f"  CDP error: {e}\n", "warn")
+
+            # Step 3: bc3 fallback
+            if not extracted:
+                self._log("  → browser_cookie3 fallback...\n", "dim")
+                if bc3_export(b, save_path) and os.path.isfile(save_path) and os.path.getsize(save_path) > 100:
+                    extracted = True
+                    self._show_cookie_result(save_path, label, method="browser_cookie3")
+                else:
+                    self._log("  bc3: no cookies or not installed\n", "warn")
+
+            if not extracted:
+                self._log("\n  ❌ All methods failed\n", "error")
+                self.cookies_status.config(text=f"{label}: FAILED", foreground="#f44747")
+                try: os.unlink(save_path)
+                except: pass
+                return
+
+            # Success — activate exported cookies
+            self.cookies_file_var.set(save_path)
+            self.cookies_browser_var.set("")  # clear browser: using file now
+            self._save_config()
+            self._update_cookies_status()
+            self._log(f"\n  💾 Saved: {save_path}\n", "info")
+            self._log(f"  ✅ Active: exported cookies will be used for HD downloads\n", "success")
+
+        def _show_cookie_result(self, cookie_file, label, method=""):
+            """Parse exported cookie file and display stats."""
+            sz = os.path.getsize(cookie_file)
+            domains = set()
+            total = 0
+            try:
+                with open(cookie_file, encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith('#'):
+                            continue
+                        parts = line.split('\t')
+                        if len(parts) >= 7:
+                            total += 1
+                            domains.add(parts[0].lstrip('.'))
+            except Exception:
+                pass
+
+            method_str = f" ({method})" if method else ""
+            self._log(f"\n  ✅ Exported{method_str}: {total} cookies, {len(domains)} domains, {sz:,}B\n", "success")
+            if domains:
+                top = sorted(domains, key=lambda d: d.count('.'), reverse=True)[:8]
+                self._log(f"     Top domains: {', '.join(top)}\n", "dim")
+            self.cookies_status.config(
+                text=f"{label}: {total} cookies ({len(domains)} domains)", foreground="#6a9955"
+            )
+
+            # Check login status for key platforms
+            for plat in ['douyin', 'youtube', 'twitter']:
+                logged, missing, hint = check_cookie_login(cookie_file, plat)
+                if not logged:
+                    self._log(f"\n  ⚠ {plat}: NOT logged in (missing: {', '.join(missing)})\n", "warn")
+                    self._log(f"     → {hint}\n", "dim")
 
         def _start(self):
             url = self.url_var.get().strip()
@@ -257,6 +374,24 @@ def main():
             if not out: messagebox.showwarning("Warning", "Select output directory"); return
             try: os.makedirs(out, exist_ok=True)
             except OSError as e: messagebox.showerror("Error", str(e)); return
+            # Prevent rapid re-download of same failing URL
+            key = (url, plat)
+            import time
+            last_ts = self._last_failed.get(key, 0)
+            if time.time() - last_ts < 60:
+                # Allow retry if configuration changed (different browser / cookies)
+                cur_browser = self.cookies_browser_var.get().strip()
+                cur_file = self.cookies_file_var.get().strip()
+                cfg_key = (cur_browser, cur_file)
+                prev_cfg = self._last_cfg.get(key, ("",""))
+                if cfg_key != prev_cfg:
+                    self._log(f"Config changed, allowing retry.\n", "info")
+                else:
+                    self._log(f"⚠ This URL+platform failed {int(time.time()-last_ts)}s ago. Skipping re-attempt.\n", "warn")
+                    self._log("  Wait 60s or change platform/URL/cookies to retry.\n", "dim")
+                    return
+            self._last_cfg[key] = (self.cookies_browser_var.get().strip(), self.cookies_file_var.get().strip())
+
             self._clear_log()
             self._log(f"Platform: {plat}\nOutput: {out}\nURL: {url}\n\n", "info")
             self.dl_btn.config(state="disabled"); self.stop_btn.config(state="normal")
@@ -274,51 +409,98 @@ def main():
                 self.dl_btn.config(state="normal"); self.stop_btn.config(state="disabled")
                 self.status_var.set(msg or ("Done" if ec==0 else f"FAIL ({ec})"))
             self.root.after(0, d)
+            # Record failure for duplicate prevention
+            if ec != 0:
+                import time
+                url = self.url_var.get().strip()
+                plat = self.platform_var.get()
+                self._last_failed[(url, plat)] = time.time()
 
         def _worker(self, url, plat, out):
+            import time, traceback
+            try:
+                self._worker_impl(url, plat, out)
+            except Exception:
+                self._log(f"\n‼ Worker crashed:\n{traceback.format_exc()}\n", "error")
+                log("error", "worker thread crash", exc_info=True)
+                self._done(1, "Worker error")
+
+        def _worker_impl(self, url, plat, out):
             import time
-            url = normalize_douyin_url(url)
+            url_new = normalize_douyin_url(url)
+            if url_new != url:
+                self._log(f"URL normalized: {url[:60]} -> {url_new[:60]}\n", "dim")
+                url = url_new
+
+            # Auto-detect platform — use detected if it's more specific than user selection
+            detected = detect_platform(url)
+            if detected != "generic":
+                if plat == "generic":
+                    self._log(f"Auto-detected platform: {detected}\n", "info")
+                    plat = detected
+                elif plat != detected:
+                    self._log(f"⚠ Platform mismatch: you selected '{plat}' but URL is {detected}\n", "warn")
+                    self._log(f"  → Using detected platform: {detected}\n", "info")
+                    plat = detected
+
             high, fallback = get_platform_presets(plat, self.config)
             st = time.time()
             self._refresh_browser_detection()
             inst = self._installed_browsers
             avail = [k for k,v in inst.items() if v["installed"]]
+            self._log(f"Platform: {plat}\n", "info")
             self._log(f"Browsers: {', '.join(BROWSER_CONFIG[k]['label'] for k in avail) if avail else '(none)'}\n", "info")
+
+            # Skip browser chain for no-login platforms
+            skip_browsers = plat in _NO_LOGIN_PLATFORMS
+            if skip_browsers:
+                self._log(f"{plat}: skipping browser chain (no login needed)\n", "info")
+                # Go directly to LQ with high preset (no cookies needed)
+                self._log("--- HD (no cookies) ---\n", "info")
+                rc = self._run(url, out, high, use_cookies=False)
+                if rc == 0:
+                    self._log("\nHD OK (no cookies)\n", "success"); cleanup_temp_files(out); self._done(0); return
+                if check_output_exists(out, st): cleanup_temp_files(out); self._done(0); return
+                self._log(f"HD failed (exit={rc}), trying LQ...\n", "warn")
 
             pref = self.config.get("cookies_from_browser","")
             self._log(f"Preferred: {pref or '(none)'}\n", "info")
 
             # cookies file
             cf = self.config.get("cookies_file")
-            if cf and os.path.isfile(cf):
+            if cf and os.path.isfile(cf) and not skip_browsers:
                 self._log(f"Using cookies file: {cf}\n", "info")
-                self._log("--- HD (file) ---\n", "info")
-                rc = self._run(url, out, high, use_cookies=True)
-                if rc==0: self._log("\nHD OK\n", "success"); cleanup_temp_files(out); self._done(0); return
-                if check_output_exists(out, st): cleanup_temp_files(out); self._done(0); return
+                # Validate login status before attempting download
+                logged, missing, hint = check_cookie_login(cf, plat)
+                if not logged:
+                    self._log(f"  ⚠ {plat}: cookies-file not logged in (missing: {', '.join(missing)})\n", "warn")
+                    self._log(f"  → {hint}\n", "dim")
+                else:
+                    self._log("--- HD (file) ---\n", "info")
+                    rc = self._run(url, out, high, use_cookies=True)
+                    if rc==0: self._log("\nHD OK\n", "success"); cleanup_temp_files(out); self._done(0); return
+                    if check_output_exists(out, st): cleanup_temp_files(out); self._done(0); return
 
             tried = set()
-            # preferred
-            if pref and inst.get(pref,{}).get("installed"):
-                tried.add(pref)
-                self._log(f"--- HD ({BROWSER_CONFIG[pref]['label']}) ---\n", "info")
-                ok = self._try_bc3_then_native(url, out, high, pref)
-                if ok: cleanup_temp_files(out); self._done(0); return
-                time.sleep(2)
-                ok = self._try_bc3_then_native(url, out, high, pref)
-                if ok: cleanup_temp_files(out); self._done(0); return
-            elif pref:
-                self._log(f"'{BROWSER_CONFIG.get(pref,{}).get('label',pref)}' not installed\n", "warn")
+            if not skip_browsers:
+                # preferred (single attempt, no retry — lock means move on)
+                if pref and inst.get(pref,{}).get("installed"):
+                    tried.add(pref)
+                    self._log(f"--- HD ({BROWSER_CONFIG[pref]['label']}) ---\n", "info")
+                    ok = self._try_bc3_then_native(url, out, high, pref, plat)
+                    if ok: cleanup_temp_files(out); self._done(0); return
+                elif pref:
+                    self._log(f"'{BROWSER_CONFIG.get(pref,{}).get('label',pref)}' not installed\n", "warn")
 
-            # alternates
-            alts = [b for b in (get_alt_browsers(pref) if pref else get_available_browsers()) if b not in tried]
-            if alts:
-                self._log(f"\nAlternates: {', '.join(BROWSER_CONFIG[b]['label'] for b in alts)}\n", "info")
-            for b in alts:
-                tried.add(b)
-                self._log(f"--- HD ({BROWSER_CONFIG[b]['label']}) ---\n", "info")
-                ok = self._try_bc3_then_native(url, out, high, b)
-                if ok: cleanup_temp_files(out); self._done(0); return
+                # alternates
+                alts = [b for b in (get_alt_browsers(pref) if pref else get_available_browsers()) if b not in tried]
+                if alts:
+                    self._log(f"\nAlternates: {', '.join(BROWSER_CONFIG[b]['label'] for b in alts)}\n", "info")
+                for b in alts:
+                    tried.add(b)
+                    self._log(f"--- HD ({BROWSER_CONFIG[b]['label']}) ---\n", "info")
+                    ok = self._try_bc3_then_native(url, out, high, b, plat)
+                    if ok: cleanup_temp_files(out); self._done(0); return
 
             if check_output_exists(out, st): cleanup_temp_files(out); self._done(0); return
 
@@ -330,19 +512,35 @@ def main():
             log("info", "falling back to low quality")
             rc = self._run(url, out, fallback, use_cookies=False)
             if rc==0: self._log("\nLQ OK\n", "success"); log("info", "LQ success")
-            else: self._log(f"\nLQ FAIL ({rc})\n", "error"); log("error", f"LQ failed exit={rc}")
+            else:
+                self._log(f"\nLQ FAIL ({rc})\n", "error")
+                log("error", f"LQ failed exit={rc}")
+                # Platform-specific help
+                if plat == "douyin":
+                    self._log("\n💡 Douyin requires fresh browser cookies.\n", "dim")
+                    self._log("   → Log into www.douyin.com in Chrome/Lenovo first.\n", "dim")
+                    self._log("   → Close Chrome before downloading (avoids DB lock).\n", "dim")
+                    self._log("   → Or use a browser where you're already logged in.\n", "dim")
             cleanup_temp_files(out); self._done(rc)
 
-        def _try_bc3_then_native(self, url, out, high, bk):
+        def _try_bc3_then_native(self, url, out, high, bk, plat="generic"):
             """Try native > bc3 > yt-dlp DPAPI for one browser."""
             label = BROWSER_CONFIG[bk]["label"]
 
-            # Step 0: zero-dep native export
+            # Step 0: zero-dep native export (may trigger CDP for v20/lnv20 cookies)
             if _native_export:
                 try:
+                    if BROWSER_CONFIG[bk].get("engine") == "chromium":
+                        self._log(f"  native (may launch CDP for v20/lnv20)...\n", "dim")
                     tmp = os.path.join(tmpmod.gettempdir(), f"vf_native_{bk}_cookies.txt")
                     if _native_export(bk, tmp) and os.path.isfile(tmp) and os.path.getsize(tmp)>100:
                         self._log(f"  native OK ({os.path.getsize(tmp)}B)\n", "success")
+                        # Check login status for platforms that need it
+                        logged, missing, hint = check_cookie_login(tmp, plat)
+                        if not logged:
+                            self._log(f"  ⚠ {plat}: not logged in (missing: {', '.join(missing)})\n", "warn")
+                            self._log(f"  → {hint}\n", "dim")
+                            return False  # Skip yt-dlp, try next browser
                         bc = dict(self.config); bc["cookies_file"]=tmp; bc["cookies_from_browser"]=None
                         args = build_yt_dlp_args(url, out, high, bc, use_cookies=True)
                         rc = self._run_with_args(args)
@@ -355,6 +553,12 @@ def main():
             tmp = os.path.join(tmpmod.gettempdir(), f"vf_{bk}_cookies.txt")
             if bc3_export(bk, tmp) and os.path.isfile(tmp) and os.path.getsize(tmp)>100:
                 self._log(f"  bc3 OK ({os.path.getsize(tmp)}B)\n", "success")
+                # Check login status for platforms that need it
+                logged, missing, hint = check_cookie_login(tmp, plat)
+                if not logged:
+                    self._log(f"  ⚠ {plat}: not logged in via bc3 (missing: {', '.join(missing)})\n", "warn")
+                    self._log(f"  → {hint}\n", "dim")
+                    return False  # Skip yt-dlp, try next browser
                 bc = dict(self.config); bc["cookies_file"]=tmp; bc["cookies_from_browser"]=None
                 args = build_yt_dlp_args(url, out, high, bc, use_cookies=True)
                 rc = self._run_with_args(args)
@@ -377,15 +581,30 @@ def main():
                 self.process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                                  text=True, encoding="utf-8", errors="replace", bufsize=1, env=os.environ)
             except Exception as e: self._log(f"Launch failed: {e}\n", "error"); return 1
+            last_errors = []  # ring buffer: last N error-like lines
+            last_lines = []   # ring buffer: last N lines overall (fallback)
+            MAX_TAIL = 10
             for line in iter(self.process.stdout.readline, ""):
                 if self.process is None: break
                 s = line.strip()
                 if not s: continue
+                last_lines.append(s)
+                if len(last_lines) > MAX_TAIL: last_lines.pop(0)
+                if "ERROR:" in s or "error" in s.lower() or "fail" in s.lower():
+                    last_errors.append(s)
+                    if len(last_errors) > MAX_TAIL: last_errors.pop(0)
                 tag = "error" if "ERROR" in s else ("warn" if "WARNING" in s else ("info" if "[download]" in s and "%" in s else ("success" if "Merger" in s or "Metadata" in s else "dim")))
                 if "[download]" in s and "%" in s: s = s[:140]
                 self._log(f"{s}\n", tag)
             self.process.wait(); rc = self.process.returncode; self.process = None
-            if rc != 0: log("warn", f"yt-dlp exited with code {rc}")
+            if rc != 0:
+                if last_errors:
+                    err_info = "; ".join(last_errors[-3:])[:300]
+                elif last_lines:
+                    err_info = "; ".join(last_lines[-3:])[:300]
+                else:
+                    err_info = "no output captured"
+                log("warn", f"yt-dlp exited with code {rc}: {err_info}")
             return rc
 
     print("Starting Video Fetcher GUI...")

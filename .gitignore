@@ -4,3 +4,14 @@ __pycache__/
 gui_error.log
 logs/
 *.log
+
+# Cookie exports contain LIVE login credentials (SESSDATA, bili_jct, auth_token...).
+# Never commit these -- pushing them hands your accounts to anyone with repo access.
+cookies/
+*.cookies.txt
+
+# Downloaded media (can be hundreds of MB) must never enter the repo.
+downloads/
+
+# Transient commit-message scratch file used by the dev workflow.
+.commit_msg

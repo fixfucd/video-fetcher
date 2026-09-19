@@ -83,6 +83,15 @@ def _read_db(db_path):
             try: os.unlink(tmp)
             except: pass
 
+def _try_cdp_fallback(output_path, browser_key):
+    """If DPAPI decryption fails (v20/lnv20), try CDP (launch browser, get cookies)."""
+    try:
+        from _cdp_cookies import export_cookies_cdp
+        return export_cookies_cdp(output_path, browser_key=browser_key)
+    except ImportError:
+        return False
+
+
 def export_cookies(browser_key, output_path):
     if _init_aes() is None: return False
     db, ls = _find_db(browser_key)
@@ -92,7 +101,7 @@ def export_cookies(browser_key, output_path):
     rows = _read_db(db)
     if not rows: return False
 
-    v10_cnt = v20_cnt = 0
+    v10_cnt = v20_cnt = lnv20_cnt = 0
     cnt = 0
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write("# Netscape HTTP Cookie File\n# video-fetcher\n\n")
@@ -100,6 +109,8 @@ def export_cookies(browser_key, output_path):
             if not ev: continue
             if ev[:3] == b'v20':
                 v20_cnt += 1; continue  # v20 needs App-Bound Encryption (Chrome COM service)
+            if ev[:5] == b'lnv20':
+                lnv20_cnt += 1; continue  # Lenovo custom encryption, needs CDP
             if ev[:3] != b'v10': continue
             v10_cnt += 1
             pl = _aes_gcm_decrypt(key, ev)
@@ -112,6 +123,9 @@ def export_cookies(browser_key, output_path):
             cnt += 1
 
     if v20_cnt > 0 and cnt == 0:
-        # All cookies are v20 → can't decrypt with pure DPAPI
-        return False
+        # All cookies are v20 (App-Bound Encryption) → try CDP
+        return _try_cdp_fallback(output_path, browser_key)
+    if lnv20_cnt > 0 and cnt == 0:
+        # All cookies are lnv20 (Lenovo custom) → try CDP
+        return _try_cdp_fallback(output_path, browser_key)
     return cnt > 0
