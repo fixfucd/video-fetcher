@@ -1,6 +1,7 @@
 """
 _cdp_cookies.py — Zero-dep cookie extraction via Chrome DevTools Protocol
-Used as fallback when file-based DPAPI decryption fails (e.g. Lenovo lnv20).
+Used as fallback when file-based DPAPI decryption fails (Chrome/Edge v20
+App-Bound Encryption).
 
 Launches the browser with --remote-debugging-port, connects via raw WebSocket,
 calls Storage.getCookies (browser decrypts cookies internally), then terminates.
@@ -173,15 +174,6 @@ def _find_edge():
     ])
 
 
-def _find_slbrowser():
-    return _find_exe([
-        os.path.join(os.environ.get('ProgramFiles(x86)', 'C:\\Program Files (x86)'),
-                     'Lenovo', 'SLBrowser', 'SLBrowser.exe'),
-        os.path.join(os.environ.get('ProgramFiles', 'C:\\Program Files'),
-                     'Lenovo', 'SLBrowser', 'SLBrowser.exe'),
-    ])
-
-
 def _find_brave():
     return _find_exe([
         os.path.join(os.environ.get('ProgramFiles', 'C:\\Program Files'),
@@ -194,7 +186,6 @@ def _find_brave():
 _BROWSER_FINDERS = {
     'chrome': _find_chrome,
     'edge': _find_edge,
-    'lenovo': _find_slbrowser,
     'brave': _find_brave,
 }
 
@@ -202,8 +193,6 @@ _BROWSER_FINDERS = {
 _BROWSER_USER_DATA = {
     'chrome':  [('{localappdata}/Google/Chrome/User Data',)],
     'edge':    [('{localappdata}/Microsoft/Edge/User Data',)],
-    'lenovo':  [('{localappdata}/Lenovo/SLBrowser/User Data',),
-                ('{localappdata}/Lenovo/SLB Browser/User Data',)],
     'brave':   [('{localappdata}/BraveSoftware/Brave-Browser/User Data',)],
 }
 
@@ -246,24 +235,24 @@ def export_cookies_cdp(output_path, browser_key=None, browser_exe=None, user_dat
     
     Provide either browser_key (auto-detect exe + user_data_dir) or
     explicit browser_exe + user_data_dir. Returns True on success.
+
+    browser_key defaults to 'chrome' so that exe and user_data_dir can never
+    disagree; pass an explicit key to target another Chromium browser.
     """
+    browser_key = browser_key or 'chrome'
+
     # Resolve browser executable
-    if browser_exe is None and browser_key:
+    if browser_exe is None:
         finder = _BROWSER_FINDERS.get(browser_key)
         if finder:
             browser_exe = finder()
-    if browser_exe is None:
-        browser_exe = _find_slbrowser()  # legacy fallback
     if not browser_exe or not os.path.isfile(browser_exe):
         return False
 
     # Resolve user data directory
-    if user_data_dir is None and browser_key:
-        user_data_dir = _find_user_data_dir(browser_key)
     if user_data_dir is None:
-        local = os.environ.get('LOCALAPPDATA', '')
-        user_data_dir = os.path.join(local, 'Lenovo', 'SLBrowser', 'User Data')
-    if not os.path.isdir(user_data_dir):
+        user_data_dir = _find_user_data_dir(browser_key)
+    if not user_data_dir or not os.path.isdir(user_data_dir):
         return False
 
     port = _pick_port()

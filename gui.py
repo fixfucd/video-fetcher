@@ -151,7 +151,7 @@ def main():
         def _update_browser_bar(self):
             inst = [k for k,v in self._installed_browsers.items() if v["installed"]]
             if inst:
-                parts = [f"{BROWSER_CONFIG[k]['label']}({self._installed_browsers[k]['profiles']}P)" for k in inst]
+                parts = [f"{BROWSER_CONFIG[k]['label']}({self._installed_browsers[k]['profiles']}P)" for k in inst if k in BROWSER_CONFIG]
                 self.browser_bar.config(text=f"Detected: {', '.join(parts)}", foreground="#6a9955")
             else:
                 self.browser_bar.config(text="No browsers detected", foreground="#ce9178")
@@ -171,8 +171,8 @@ def main():
             else: self._log("native cookie crypto: AES backend missing (pip install cryptography)\n", "warn")
             if _has_bc3(): self._log("browser_cookie3: available\n", "success")
             else: self._log("browser_cookie3: NOT INSTALLED\n", "dim")
-            if _has_cdp(): self._log("CDP fallback (Lenovo lnv20): available\n", "success")
-            else: self._log("CDP fallback (Lenovo lnv20): NOT AVAILABLE\n", "dim")
+            if _has_cdp(): self._log("CDP cookie fallback: available\n", "success")
+            else: self._log("CDP cookie fallback: NOT AVAILABLE\n", "dim")
 
         def _log(self, text, tag="info"):
             def w():
@@ -280,7 +280,7 @@ def main():
             os.makedirs(save_dir, exist_ok=True)
             save_path = os.path.join(save_dir, f"{b}.txt")
 
-            # Step 1: native DPAPI export (includes CDP fallback for Lenovo lnv20)
+            # Step 1: native DPAPI export (falls back to CDP internally if needed)
             extracted = False
             if _native_export:
                 self._log("  → native DPAPI export...\n", "dim")
@@ -289,11 +289,11 @@ def main():
                         extracted = True
                         self._show_cookie_result(save_path, label, method="native DPAPI")
                     else:
-                        self._log("  native export: no cookies (v20/lnv20 encrypted or locked)\n", "warn")
+                        self._log("  native export: no cookies (v20 encrypted or locked)\n", "warn")
                 except Exception as e:
                     self._log(f"  native error: {e}\n", "warn")
 
-            # Step 2: CDP fallback (all Chromium browsers for v20/lnv20 support)
+            # Step 2: CDP fallback (any installed Chromium browser)
             if not extracted and cfg.get("engine") == "chromium":
                 self._log(f"  → CDP fallback (launching {label}, ~15s)...\n", "dim")
                 try:
@@ -486,7 +486,7 @@ def main():
                 # preferred (single attempt, no retry — lock means move on)
                 if pref and inst.get(pref,{}).get("installed"):
                     tried.add(pref)
-                    self._log(f"--- HD ({BROWSER_CONFIG[pref]['label']}) ---\n", "info")
+                    self._log(f"--- HD ({BROWSER_CONFIG.get(pref,{}).get('label',pref)}) ---\n", "info")
                     ok = self._try_bc3_then_native(url, out, high, pref, plat)
                     if ok: cleanup_temp_files(out); self._done(0); return
                 elif pref:
@@ -495,10 +495,10 @@ def main():
                 # alternates
                 alts = [b for b in (get_alt_browsers(pref) if pref else get_available_browsers()) if b not in tried]
                 if alts:
-                    self._log(f"\nAlternates: {', '.join(BROWSER_CONFIG[b]['label'] for b in alts)}\n", "info")
+                    self._log(f"\nAlternates: {', '.join(BROWSER_CONFIG.get(b,{}).get('label',b) for b in alts)}\n", "info")
                 for b in alts:
                     tried.add(b)
-                    self._log(f"--- HD ({BROWSER_CONFIG[b]['label']}) ---\n", "info")
+                    self._log(f"--- HD ({BROWSER_CONFIG.get(b,{}).get('label',b)}) ---\n", "info")
                     ok = self._try_bc3_then_native(url, out, high, b, plat)
                     if ok: cleanup_temp_files(out); self._done(0); return
 
@@ -518,20 +518,20 @@ def main():
                 # Platform-specific help
                 if plat == "douyin":
                     self._log("\n💡 Douyin requires fresh browser cookies.\n", "dim")
-                    self._log("   → Log into www.douyin.com in Chrome/Lenovo first.\n", "dim")
+                    self._log("   → Log into www.douyin.com in Chrome or Edge first.\n", "dim")
                     self._log("   → Close Chrome before downloading (avoids DB lock).\n", "dim")
                     self._log("   → Or use a browser where you're already logged in.\n", "dim")
             cleanup_temp_files(out); self._done(rc)
 
         def _try_bc3_then_native(self, url, out, high, bk, plat="generic"):
             """Try native > bc3 > yt-dlp DPAPI for one browser."""
-            label = BROWSER_CONFIG[bk]["label"]
+            label = BROWSER_CONFIG.get(bk, {}).get("label", bk)
 
-            # Step 0: zero-dep native export (may trigger CDP for v20/lnv20 cookies)
+            # Step 0: zero-dep native export (may trigger the CDP fallback)
             if _native_export:
                 try:
                     if BROWSER_CONFIG[bk].get("engine") == "chromium":
-                        self._log(f"  native (may launch CDP for v20/lnv20)...\n", "dim")
+                        self._log(f"  native (may launch CDP)...\n", "dim")
                     tmp = os.path.join(tmpmod.gettempdir(), f"vf_native_{bk}_cookies.txt")
                     if _native_export(bk, tmp) and os.path.isfile(tmp) and os.path.getsize(tmp)>100:
                         self._log(f"  native OK ({os.path.getsize(tmp)}B)\n", "success")

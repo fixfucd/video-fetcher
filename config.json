@@ -1,10 +1,10 @@
 {
   "_说明": "video-fetcher 配置文件。修改后即时生效。",
-  "_browsers": "支持的浏览器: chrome, edge, lenovo(联想浏览器), brave, opera, firefox。yt-dlp 不原生支持 lenovo，会自动通过 cookies 文件路径读取。",
-  "_fallback": "当首选浏览器 cookies 被占用时，自动按优先级回退: chrome → edge → lenovo → brave → opera → firefox。所有浏览器均失败后回退低清。",
+  "_browsers": "支持的浏览器: chrome, edge, brave, opera, firefox。",
+  "_fallback": "当首选浏览器 cookies 被占用时，自动按优先级回退: chrome → edge → brave → opera → firefox。所有浏览器均失败后回退低清。",
   "output_dir": "E:/工作/work2/downloads",
-  "cookies_from_browser": "lenovo",
-  "cookies_file": "C:\\Users\\lenovo\\video-fetcher\\cookies\\slb_fresh.txt",
+  "cookies_from_browser": "chrome",
+  "cookies_file": "C:\\Users\\lenovo\\video-fetcher\\cookies\\cookies.txt",
   "platforms": {
     "bilibili": {
       "format": "bestvideo+bestaudio/best",

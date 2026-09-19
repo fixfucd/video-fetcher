@@ -41,10 +41,9 @@ def _safe_print(text=""):
 BROWSER_CONFIG = {
     "chrome": {"yt_name":"chrome","native":True,"label":"Chrome","engine":"chromium","base_dirs":["{localappdata}/Google/Chrome/User Data"],"cookies_paths":["{profile}/Network/Cookies","{profile}/Cookies"],"priority":1},
     "edge": {"yt_name":"edge","native":True,"label":"Edge","engine":"chromium","base_dirs":["{localappdata}/Microsoft/Edge/User Data"],"cookies_paths":["{profile}/Network/Cookies","{profile}/Cookies"],"priority":2},
-    "lenovo": {"yt_name":None,"native":False,"label":"Lenovo","engine":"chromium","base_dirs":["{localappdata}/Lenovo/SLBrowser/User Data","{localappdata}/Lenovo/SLB Browser/User Data","{localappdata}/Lenovo/LenovoBrowser/User Data"],"cookies_paths":["{profile}/Network/Cookies","{profile}/Cookies"],"priority":3},
-    "brave": {"yt_name":"brave","native":True,"label":"Brave","engine":"chromium","base_dirs":["{localappdata}/BraveSoftware/Brave-Browser/User Data"],"cookies_paths":["{profile}/Network/Cookies","{profile}/Cookies"],"priority":4},
-    "opera": {"yt_name":"opera","native":True,"label":"Opera","engine":"chromium","base_dirs":["{appdata}/Opera Software/Opera Stable"],"cookies_paths":["{profile}/Network/Cookies","{profile}/Cookies"],"priority":5},
-    "firefox": {"yt_name":"firefox","native":True,"label":"Firefox","engine":"gecko","base_dirs":[],"cookies_paths":[],"priority":6},
+    "brave": {"yt_name":"brave","native":True,"label":"Brave","engine":"chromium","base_dirs":["{localappdata}/BraveSoftware/Brave-Browser/User Data"],"cookies_paths":["{profile}/Network/Cookies","{profile}/Cookies"],"priority":3},
+    "opera": {"yt_name":"opera","native":True,"label":"Opera","engine":"chromium","base_dirs":["{appdata}/Opera Software/Opera Stable"],"cookies_paths":["{profile}/Network/Cookies","{profile}/Cookies"],"priority":4},
+    "firefox": {"yt_name":"firefox","native":True,"label":"Firefox","engine":"gecko","base_dirs":[],"cookies_paths":[],"priority":5},
 }
 
 PLATFORM_PRESETS = {
@@ -458,12 +457,12 @@ def fetch(url, platform="generic", output_dir=None, config_path=None, extra_args
 
     installed = detect_installed_browsers()
     available = [k for k,v in installed.items() if v["installed"]]
-    labels = ", ".join(BROWSER_CONFIG[k]["label"] for k in available) if available else "(none)"
+    labels = ", ".join(BROWSER_CONFIG.get(k, {}).get("label", k) for k in available) if available else "(none)"
     bc3_status = "available" if _has_bc3() else "NOT INSTALLED (pip install browser-cookie3)"
     cdp_status = "available" if _has_cdp() else "NOT AVAILABLE"
     print(f"[video-fetcher] browsers: {labels}")
     print(f"[video-fetcher] browser_cookie3: {bc3_status}")
-    print(f"[video-fetcher] CDP (Lenovo lnv20): {cdp_status}")
+    print(f"[video-fetcher] CDP cookie fallback: {cdp_status}")
 
     pref = config.get("cookies_from_browser","")
     print(f"[video-fetcher] platform: {platform} | preferred: {pref or '(none)'}")
@@ -505,7 +504,7 @@ def fetch(url, platform="generic", output_dir=None, config_path=None, extra_args
         # alternates
         alts = [b for b in get_available_browsers() if b not in tried]
         if alts:
-            print(f"\n[video-fetcher] alternates: {', '.join(BROWSER_CONFIG[b]['label'] for b in alts)}")
+            print(f"\n[video-fetcher] alternates: {', '.join(BROWSER_CONFIG.get(b, {}).get('label', b) for b in alts)}")
         for b in alts:
             tried.add(b)
             ok,stderr_a = _try_browser(url, output_dir, high, config, b, start_time, platform, extra_args)
@@ -525,7 +524,7 @@ def fetch(url, platform="generic", output_dir=None, config_path=None, extra_args
         print(f"[video-fetcher] LQ FAIL ({rc})")
         if platform == "douyin":
             print("[video-fetcher] 💡 Douyin requires fresh browser cookies.")
-            print("[video-fetcher]    → Log into www.douyin.com in Chrome/Edge/Lenovo.")
+            print("[video-fetcher]    → Log into www.douyin.com in Chrome or Edge.")
             print("[video-fetcher]    → Select that browser in the cookies dropdown, then retry.")
             print("[video-fetcher]    → Close the browser BEFORE downloading (avoids DB lock).")
             print("[video-fetcher]    → If cookies are v20 (Chrome 127+), try Firefox or bc3.")

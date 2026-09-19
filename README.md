@@ -85,12 +85,15 @@ android 端 https 格式被 SABR-only 流媒体实验跳过，ios 端要求 GVS 
 |--------|----------|------------|------|
 | Chrome | ✓ | ✓ | `%LOCALAPPDATA%\Google\Chrome\User Data` |
 | Edge | ✓ | ✓ | `%LOCALAPPDATA%\Microsoft\Edge\User Data` |
-| 联想浏览器 | ✓ | ✗ (DB拷贝) | `%LOCALAPPDATA%\Lenovo\SLBrowser\User Data` |
 | Brave | ✓ | ✓ | `%LOCALAPPDATA%\BraveSoftware\Brave-Browser\User Data` |
 | Opera | ✓ | ✓ | `%APPDATA%\Opera Software\Opera Stable` |
 | Firefox | ✓ | ✓ | `%APPDATA%\Mozilla\Firefox\Profiles` |
 
 **DB 临时拷贝**：当浏览器 cookies 数据库被锁定时，自动拷贝到临时文件绕过锁。
+
+**CDP 回退**：Chrome 127+ / Edge 的 cookies 使用 v20 App-Bound Encryption，本地 DPAPI
+解密会失败。此时自动以 `--remote-debugging-port` 启动该浏览器，通过 CDP 让浏览器
+自己解密并导出 cookies（见 `_cdp_cookies.py`）。这是绕开 v20 的可靠通道。
 
 **可选依赖**：`pip install browser-cookie3` 可获得额外浏览器支持（作为最终兜底）。
 
@@ -116,7 +119,7 @@ video-fetcher/
 ├── gui.py            # 可视化客户端
 ├── config.json       # 配置文件
 ├── README.md
-├── _cdp_cookies.py   # 联想浏览器 cookies 导出（CDP，yt-dlp 不支持该浏览器）
+├── _cdp_cookies.py   # CDP cookies 导出（绕开 Chrome/Edge v20 App-Bound Encryption）
 ├── _cookie_crypto.py # 原生 DPAPI + AES-GCM cookies 解密（零依赖）
 ├── _logger.py        # 统一日志（自动轮转，目录不可写时降级并告警）
 ├── _run_bili_test.py # B站端到端冒烟测试
