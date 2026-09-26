@@ -32,6 +32,9 @@
   "yt_dlp_global": {
     "concurrent_fragments": 8,
     "no_overwrites": false,
-    "restrict_filenames": false
+    "restrict_filenames": false,
+    "js_runtimes": "node",
+    "remote_components": "ejs:github",
+    "_js_note": "YouTube 的 n 挑战需要 JS 运行时 + 挑战求解脚本：js_runtimes 启用本机 Node.js，remote_components 放行从 GitHub 取 EJS 脚本（yt-dlp 默认拒绝）。实测缺任一项时高清格式全部拿不到，只能落到 720p 兜底档。"
   }
 }
