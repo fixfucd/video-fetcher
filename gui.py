@@ -4,8 +4,38 @@ video-fetcher GUI — visual video download client
 Start: python gui.py
 """
 
-import os, sys, traceback, subprocess, threading, tempfile as tmpmod
+import os, sys, traceback, subprocess, threading
 from _logger import log, set_log_file, close as close_log
+
+def _popen_group_kwargs():
+    """Start each download in its own process group for reliable cancellation."""
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+def _terminate_process_tree(proc):
+    """Terminate only the download process tree owned by this GUI."""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            result = subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                capture_output=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                return
+        else:
+            import signal
+            os.killpg(proc.pid, signal.SIGTERM)
+            return
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        proc.terminate()
+    except OSError:
+        pass
 
 def _crash_log(exc_info):
     try: log("error", "GUI crash", exc_info=True)
@@ -34,12 +64,13 @@ def main():
             PLATFORM_PRESETS, BROWSER_CONFIG,
             load_config, get_platform_presets, build_yt_dlp_args,
             check_tool, normalize_douyin_url,
-            cleanup_temp_files, check_output_exists,
             find_cookies_file, get_alt_browsers,
             is_cookie_lock_error, detect_installed_browsers,
             detect_browser_profiles, get_available_browsers,
             _expand_path, _has_bc3, bc3_export, _native_export, _has_cdp,
-            detect_platform, _NO_LOGIN_PLATFORMS, check_cookie_login,
+            detect_platform, _PUBLIC_FIRST_PLATFORMS, check_cookie_login,
+            _make_temp_cookie_file, _remove_temp_cookie_file,
+            _utf8_subprocess_env, is_douyin_web_detail_failure,
         )
     except ImportError as e:
         print(f"import failed: {e}", file=sys.stderr)
@@ -55,6 +86,8 @@ def main():
             self._installed_browsers = {}
             self._last_failed = {}  # (url, platform) -> timestamp
             self._last_cfg = {}     # (url, platform) -> (browser, cookies_file)
+            self._last_ytdlp_tail = ""
+            self._cancel_event = threading.Event()
             self._fix_env()
             self._refresh_browser_detection()
             self._setup_ui()
@@ -374,6 +407,9 @@ def main():
             if not out: messagebox.showwarning("Warning", "Select output directory"); return
             try: os.makedirs(out, exist_ok=True)
             except OSError as e: messagebox.showerror("Error", str(e)); return
+            # Editable fields may not have emitted a selection/browse event.
+            # Synchronize what the user sees before taking the run snapshot.
+            self._save_config()
             # Prevent rapid re-download of same failing URL
             key = (url, plat)
             import time
@@ -396,21 +432,24 @@ def main():
             self._log(f"Platform: {plat}\nOutput: {out}\nURL: {url}\n\n", "info")
             self.dl_btn.config(state="disabled"); self.stop_btn.config(state="normal")
             self.status_var.set("Downloading..."); self.process = None
+            self._cancel_event.clear()
             log("info", f"GUI download start: url={url[:80]} platform={plat} output={out}")
             threading.Thread(target=self._worker, args=(url, plat, out), daemon=True).start()
 
         def _stop(self):
-            if self.process and self.process.poll() is None:
-                self.process.terminate(); self._log("\n[Stopped]\n", "warn")
-                cleanup_temp_files(self.output_var.get().strip()); self._done(1, "Stopped")
+            self._cancel_event.set()
+            self._log("\n[Stop requested; partial file will be kept for resume]\n", "warn")
+            self.status_var.set("Stopping...")
+            _terminate_process_tree(self.process)
 
         def _done(self, ec, msg=""):
             def d():
                 self.dl_btn.config(state="normal"); self.stop_btn.config(state="disabled")
                 self.status_var.set(msg or ("Done" if ec==0 else f"FAIL ({ec})"))
+                self._cancel_event.clear()
             self.root.after(0, d)
             # Record failure for duplicate prevention
-            if ec != 0:
+            if ec != 0 and msg != "Stopped":
                 import time
                 url = self.url_var.get().strip()
                 plat = self.platform_var.get()
@@ -426,7 +465,7 @@ def main():
                 self._done(1, "Worker error")
 
         def _worker_impl(self, url, plat, out):
-            import time
+            self._last_ytdlp_tail = ""
             url_new = normalize_douyin_url(url)
             if url_new != url:
                 self._log(f"URL normalized: {url[:60]} -> {url_new[:60]}\n", "dim")
@@ -444,31 +483,31 @@ def main():
                     plat = detected
 
             high, fallback = get_platform_presets(plat, self.config)
-            st = time.time()
             self._refresh_browser_detection()
             inst = self._installed_browsers
             avail = [k for k,v in inst.items() if v["installed"]]
             self._log(f"Platform: {plat}\n", "info")
             self._log(f"Browsers: {', '.join(BROWSER_CONFIG[k]['label'] for k in avail) if avail else '(none)'}\n", "info")
 
-            # Skip browser chain for no-login platforms
-            skip_browsers = plat in _NO_LOGIN_PLATFORMS
-            if skip_browsers:
-                self._log(f"{plat}: skipping browser chain (no login needed)\n", "info")
-                # Go directly to LQ with high preset (no cookies needed)
-                self._log("--- HD (no cookies) ---\n", "info")
+            public_first = plat in _PUBLIC_FIRST_PLATFORMS
+            public_rc = None
+            if public_first:
+                self._log(f"{plat}: trying public access before browser cookies\n", "info")
+                self._log("--- Public access ---\n", "info")
                 rc = self._run(url, out, high, use_cookies=False)
                 if rc == 0:
-                    self._log("\nHD OK (no cookies)\n", "success"); cleanup_temp_files(out); self._done(0); return
-                if check_output_exists(out, st): cleanup_temp_files(out); self._done(0); return
-                self._log(f"HD failed (exit={rc}), trying LQ...\n", "warn")
+                    self._log("\nPublic access OK\n", "success"); self._done(0); return
+                public_rc = rc
+                if self._cancel_event.is_set(): self._done(1, "Stopped"); return
+                self._log(f"Public access failed (exit={rc}), trying browser cookies...\n", "warn")
 
             pref = self.config.get("cookies_from_browser","")
             self._log(f"Preferred: {pref or '(none)'}\n", "info")
+            douyin_web_detail_seen = False
 
             # cookies file
             cf = self.config.get("cookies_file")
-            if cf and os.path.isfile(cf) and not skip_browsers:
+            if cf and os.path.isfile(cf):
                 self._log(f"Using cookies file: {cf}\n", "info")
                 # Validate login status before attempting download
                 logged, missing, hint = check_cookie_login(cf, plat)
@@ -478,36 +517,47 @@ def main():
                 else:
                     self._log("--- HD (file) ---\n", "info")
                     rc = self._run(url, out, high, use_cookies=True)
-                    if rc==0: self._log("\nHD OK\n", "success"); cleanup_temp_files(out); self._done(0); return
-                    if check_output_exists(out, st): cleanup_temp_files(out); self._done(0); return
+                    if rc==0: self._log("\nHD OK\n", "success"); self._done(0); return
+                    if self._cancel_event.is_set(): self._done(1, "Stopped"); return
+                    if plat == "douyin" and is_douyin_web_detail_failure(self._last_ytdlp_tail):
+                        douyin_web_detail_seen = True
 
             tried = set()
-            if not skip_browsers:
-                # preferred (single attempt, no retry — lock means move on)
-                if pref and inst.get(pref,{}).get("installed"):
-                    tried.add(pref)
-                    self._log(f"--- HD ({BROWSER_CONFIG.get(pref,{}).get('label',pref)}) ---\n", "info")
-                    ok = self._try_bc3_then_native(url, out, high, pref, plat)
-                    if ok: cleanup_temp_files(out); self._done(0); return
-                elif pref:
-                    self._log(f"'{BROWSER_CONFIG.get(pref,{}).get('label',pref)}' not installed\n", "warn")
+            # preferred (single attempt, no retry — lock means move on)
+            if pref and inst.get(pref,{}).get("installed"):
+                tried.add(pref)
+                self._log(f"--- HD ({BROWSER_CONFIG.get(pref,{}).get('label',pref)}) ---\n", "info")
+                ok = self._try_bc3_then_native(url, out, high, pref, plat)
+                if ok: self._done(0); return
+                if self._cancel_event.is_set(): self._done(1, "Stopped"); return
+                if plat == "douyin" and is_douyin_web_detail_failure(self._last_ytdlp_tail):
+                    douyin_web_detail_seen = True
+            elif pref:
+                self._log(f"'{BROWSER_CONFIG.get(pref,{}).get('label',pref)}' not installed\n", "warn")
 
-                # alternates
-                alts = [b for b in (get_alt_browsers(pref) if pref else get_available_browsers()) if b not in tried]
-                if alts:
-                    self._log(f"\nAlternates: {', '.join(BROWSER_CONFIG.get(b,{}).get('label',b) for b in alts)}\n", "info")
-                for b in alts:
-                    tried.add(b)
-                    self._log(f"--- HD ({BROWSER_CONFIG.get(b,{}).get('label',b)}) ---\n", "info")
-                    ok = self._try_bc3_then_native(url, out, high, b, plat)
-                    if ok: cleanup_temp_files(out); self._done(0); return
+            # alternates
+            alts = [b for b in (get_alt_browsers(pref) if pref else get_available_browsers()) if b not in tried]
+            if alts:
+                self._log(f"\nAlternates: {', '.join(BROWSER_CONFIG.get(b,{}).get('label',b) for b in alts)}\n", "info")
+            for b in alts:
+                tried.add(b)
+                self._log(f"--- HD ({BROWSER_CONFIG.get(b,{}).get('label',b)}) ---\n", "info")
+                ok = self._try_bc3_then_native(url, out, high, b, plat)
+                if ok: self._done(0); return
+                if self._cancel_event.is_set(): self._done(1, "Stopped"); return
+                if plat == "douyin" and is_douyin_web_detail_failure(self._last_ytdlp_tail):
+                    douyin_web_detail_seen = True
 
-            if check_output_exists(out, st): cleanup_temp_files(out); self._done(0); return
+            if plat == "douyin" and douyin_web_detail_seen:
+                self._report_douyin_web_detail_failure(); self._done(1, "Douyin blocked"); return
 
             log("warn", f"all browser attempts failed, falling back")
             # fallback
             if fallback is None:
-                self._log(f"\n{plat} needs login, abort.\n", "error"); log("error", f"all methods failed for {plat}"); cleanup_temp_files(out); self._done(1); return
+                self._log(f"\n{plat} needs login, abort.\n", "error"); log("error", f"all methods failed for {plat}"); self._done(1); return
+            if public_first and fallback == high and public_rc is not None:
+                self._log("\nPublic attempt already used the fallback settings; not repeating it.\n", "warn")
+                self._done(public_rc); return
             self._log("\n--- LQ fallback ---\n", "warn")
             log("info", "falling back to low quality")
             rc = self._run(url, out, fallback, use_cookies=False)
@@ -517,14 +567,23 @@ def main():
                 log("error", f"LQ failed exit={rc}")
                 # Platform-specific help
                 if plat == "douyin":
-                    self._log("\n💡 Douyin requires fresh browser cookies.\n", "dim")
-                    self._log("   → Log into www.douyin.com in Chrome or Edge first.\n", "dim")
-                    self._log("   → Close Chrome before downloading (avoids DB lock).\n", "dim")
-                    self._log("   → Or use a browser where you're already logged in.\n", "dim")
-            cleanup_temp_files(out); self._done(rc)
+                    if is_douyin_web_detail_failure(self._last_ytdlp_tail):
+                        self._report_douyin_web_detail_failure()
+                    else:
+                        self._log("\nDouyin cookies may be missing or expired.\n", "dim")
+                        self._log("   → Log into www.douyin.com, export cookies, then retry.\n", "dim")
+            self._done(rc, "Stopped" if self._cancel_event.is_set() else "")
+
+        def _report_douyin_web_detail_failure(self):
+            self._log("\nDouyin rejected yt-dlp's web-detail request from every available cookie source.\n", "error")
+            self._log("Cookies may be expired, or Douyin may require a dynamic request signature.\n", "warn")
+            self._log("If the freshly exported browser session can play this video, the current yt-dlp extractor is the likely limitation.\n", "warn")
 
         def _try_bc3_then_native(self, url, out, high, bk, plat="generic"):
             """Try native > bc3 > yt-dlp DPAPI for one browser."""
+            self._last_ytdlp_tail = ""
+            if self._cancel_event.is_set():
+                return False
             label = BROWSER_CONFIG.get(bk, {}).get("label", bk)
 
             # Step 0: zero-dep native export (may trigger the CDP fallback)
@@ -532,42 +591,55 @@ def main():
                 try:
                     if BROWSER_CONFIG[bk].get("engine") == "chromium":
                         self._log(f"  native (may launch CDP)...\n", "dim")
-                    tmp = os.path.join(tmpmod.gettempdir(), f"vf_native_{bk}_cookies.txt")
-                    if _native_export(bk, tmp) and os.path.isfile(tmp) and os.path.getsize(tmp)>100:
-                        self._log(f"  native OK ({os.path.getsize(tmp)}B)\n", "success")
-                        # Check login status for platforms that need it
-                        logged, missing, hint = check_cookie_login(tmp, plat)
-                        if not logged:
-                            self._log(f"  ⚠ {plat}: not logged in (missing: {', '.join(missing)})\n", "warn")
-                            self._log(f"  → {hint}\n", "dim")
-                            return False  # Skip yt-dlp, try next browser
-                        bc = dict(self.config); bc["cookies_file"]=tmp; bc["cookies_from_browser"]=None
-                        args = build_yt_dlp_args(url, out, high, bc, use_cookies=True)
-                        rc = self._run_with_args(args)
-                        if rc==0: self._log(f"\n{label} HD OK (native)\n", "success"); return True
-                        return False
+                    tmp = _make_temp_cookie_file(bk, "native")
+                    try:
+                        if _native_export(bk, tmp) and os.path.isfile(tmp) and os.path.getsize(tmp)>100:
+                            if self._cancel_event.is_set():
+                                return False
+                            self._log(f"  native OK ({os.path.getsize(tmp)}B)\n", "success")
+                            logged, missing, hint = check_cookie_login(tmp, plat)
+                            if not logged:
+                                self._log(f"  ⚠ {plat}: not logged in (missing: {', '.join(missing)})\n", "warn")
+                                self._log(f"  → {hint}\n", "dim")
+                                return False
+                            bc = dict(self.config); bc["cookies_file"]=tmp; bc["cookies_from_browser"]=None
+                            args = build_yt_dlp_args(url, out, high, bc, use_cookies=True)
+                            rc = self._run_with_args(args)
+                            if rc==0: self._log(f"\n{label} HD OK (native)\n", "success"); return True
+                            return False
+                    finally:
+                        _remove_temp_cookie_file(tmp)
                 except Exception as e:
                     self._log(f"  native error: {e}\n", "dim")
 
             # Step 1: browser_cookie3
-            tmp = os.path.join(tmpmod.gettempdir(), f"vf_{bk}_cookies.txt")
-            if bc3_export(bk, tmp) and os.path.isfile(tmp) and os.path.getsize(tmp)>100:
-                self._log(f"  bc3 OK ({os.path.getsize(tmp)}B)\n", "success")
-                # Check login status for platforms that need it
-                logged, missing, hint = check_cookie_login(tmp, plat)
-                if not logged:
-                    self._log(f"  ⚠ {plat}: not logged in via bc3 (missing: {', '.join(missing)})\n", "warn")
-                    self._log(f"  → {hint}\n", "dim")
-                    return False  # Skip yt-dlp, try next browser
-                bc = dict(self.config); bc["cookies_file"]=tmp; bc["cookies_from_browser"]=None
-                args = build_yt_dlp_args(url, out, high, bc, use_cookies=True)
-                rc = self._run_with_args(args)
-                if rc==0: self._log(f"\n{label} HD OK (bc3)\n", "success"); return True
+            if self._cancel_event.is_set():
                 return False
+            tmp = _make_temp_cookie_file(bk, "bc3")
+            try:
+                if bc3_export(bk, tmp) and os.path.isfile(tmp) and os.path.getsize(tmp)>100:
+                    if self._cancel_event.is_set():
+                        return False
+                    self._log(f"  bc3 OK ({os.path.getsize(tmp)}B)\n", "success")
+                    logged, missing, hint = check_cookie_login(tmp, plat)
+                    if not logged:
+                        self._log(f"  ⚠ {plat}: not logged in via bc3 (missing: {', '.join(missing)})\n", "warn")
+                        self._log(f"  → {hint}\n", "dim")
+                        return False
+                    bc = dict(self.config); bc["cookies_file"]=tmp; bc["cookies_from_browser"]=None
+                    args = build_yt_dlp_args(url, out, high, bc, use_cookies=True)
+                    rc = self._run_with_args(args)
+                    if rc==0: self._log(f"\n{label} HD OK (bc3)\n", "success"); return True
+                    return False
+            finally:
+                _remove_temp_cookie_file(tmp)
 
             # Step 2: yt-dlp DPAPI
+            if self._cancel_event.is_set():
+                return False
             if BROWSER_CONFIG[bk].get("native"):
-                rc = self._run(url, out, high, use_cookies=True)
+                ac = dict(self.config); ac["cookies_from_browser"] = bk; ac["cookies_file"] = None
+                rc = self._run_with_args(build_yt_dlp_args(url, out, high, ac, use_cookies=True))
                 if rc==0: self._log(f"\n{label} HD OK (yt-dlp)\n", "success"); return True
                 self._log(f"  {label} DPAPI FAIL (exit={rc})\n", "warn")
             return False
@@ -576,16 +648,24 @@ def main():
             return self._run_with_args(build_yt_dlp_args(url, out, opts, self.config, use_cookies=use_cookies))
 
         def _run_with_args(self, args):
+            if self._cancel_event.is_set():
+                return 130
+            self._last_ytdlp_tail = ""
             self._log(f"cmd: {' '.join(args)}\n", "dim")
             try:
-                self.process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                                 text=True, encoding="utf-8", errors="replace", bufsize=1, env=os.environ)
+                proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                        text=True, encoding="utf-8", errors="replace", bufsize=1,
+                                        env=_utf8_subprocess_env(), **_popen_group_kwargs())
+                self.process = proc
+                # Close the narrow race where Stop was clicked after the first
+                # cancellation check but before self.process was assigned.
+                if self._cancel_event.is_set():
+                    _terminate_process_tree(proc)
             except Exception as e: self._log(f"Launch failed: {e}\n", "error"); return 1
             last_errors = []  # ring buffer: last N error-like lines
             last_lines = []   # ring buffer: last N lines overall (fallback)
             MAX_TAIL = 10
-            for line in iter(self.process.stdout.readline, ""):
-                if self.process is None: break
+            for line in iter(proc.stdout.readline, ""):
                 s = line.strip()
                 if not s: continue
                 last_lines.append(s)
@@ -596,7 +676,10 @@ def main():
                 tag = "error" if "ERROR" in s else ("warn" if "WARNING" in s else ("info" if "[download]" in s and "%" in s else ("success" if "Merger" in s or "Metadata" in s else "dim")))
                 if "[download]" in s and "%" in s: s = s[:140]
                 self._log(f"{s}\n", tag)
-            self.process.wait(); rc = self.process.returncode; self.process = None
+            proc.wait(); rc = proc.returncode
+            self._last_ytdlp_tail = "\n".join(last_lines)
+            if self.process is proc:
+                self.process = None
             if rc != 0:
                 if last_errors:
                     err_info = "; ".join(last_errors[-3:])[:300]
@@ -610,7 +693,12 @@ def main():
     print("Starting Video Fetcher GUI...")
     set_log_file("gui")
     log("info", "GUI starting")
-    root = tk.Tk(); app = VideoFetcherGUI(root); root.mainloop()
+    root = tk.Tk(); app = VideoFetcherGUI(root)
+    # A GUI started from another application can otherwise open behind that
+    # application. Raise it once, then immediately return to normal z-order.
+    root.deiconify(); root.lift(); root.attributes("-topmost", True)
+    root.after(800, lambda: root.attributes("-topmost", False))
+    root.mainloop()
     log("info", "GUI closed")
     close_log()
     print("GUI closed.")

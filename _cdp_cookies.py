@@ -259,12 +259,9 @@ def export_cookies_cdp(output_path, browser_key=None, browser_exe=None, user_dat
     proc = None
 
     try:
-        # Kill any lingering browser instances that might lock the profile
-        proc_name = os.path.basename(browser_exe)
-        subprocess.run(['taskkill', '/f', '/im', proc_name],
-                       capture_output=True, timeout=10)
-        time.sleep(1)
-
+        # Never terminate the user's existing browser. If the profile is in use,
+        # the debug endpoint may not start and this method will fail cleanly; the
+        # caller can ask the user to close the browser and retry.
         # Launch browser with remote debugging
         proc = subprocess.Popen(
             [browser_exe,

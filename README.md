@@ -6,6 +6,21 @@
 
 ## 使用方式
 
+### 环境准备
+
+需要 Python 3.9+、[yt-dlp](https://github.com/yt-dlp/yt-dlp) 和 ffmpeg：
+
+```bash
+python -m pip install -U yt-dlp
+ffmpeg -version
+```
+
+`browser-cookie3` 是可选回退，不安装也可使用浏览器原生 Cookie 与低清回退：
+
+```bash
+python -m pip install browser-cookie3
+```
+
 ### 命令行
 
 ```bash
@@ -14,6 +29,19 @@ python fetch.py --list-browsers
 
 # B站
 python fetch.py "https://www.bilibili.com/video/BV1xx411c7mD" -p bilibili
+```
+
+平台参数可省略，程序会按 URL 域名自动识别。短链域名 `youtu.be`、`b23.tv` 和
+`v.douyin.com` 也支持识别：
+
+```bash
+python fetch.py "https://youtu.be/xxxxxxxxxxx"
+```
+
+需要传入额外的 yt-dlp 参数时，把它们放在 `--extra` 后；该标记之后的全部参数都会原样传递：
+
+```bash
+python fetch.py "https://example.com/video" --extra --proxy http://127.0.0.1:7890
 ```
 
 ```bash
@@ -49,9 +77,11 @@ python gui.py
 ## 策略
 
 ```
+Twitter/通用链接先尝试公开访问 ──成功──▶ 完成
+      │失败
+      ▼
 首选浏览器 cookies ──成功──▶ 完成
       │失败 (被锁)
-      ├── 等待2秒重试
       ├── 备用浏览器1 (仅已安装)
       ├── 备用浏览器2 (仅已安装)
       ├── ...
@@ -68,16 +98,20 @@ python gui.py
 |------|------|----------|------|
 | B站 | 4K (cookies) | 720p | 无 cookies → HTTP 412，**必须** cookies |
 | YouTube | 4K+字幕 (web+cookies) | bestvideo[height<=720] (android,ios) | 无 cookies 实测仅得 360p，见下 |
-| 抖音 | bestvideo+bestaudio (cookies) | best | 需**新鲜** cookies |
+| 抖音 | bestvideo+bestaudio (cookies) | best | 403 可能来自 Cookie 过期，也可能是 yt-dlp 缺少动态请求签名 |
 | Twitter | best (cookies) | best (无 cookies) | 公开视频推文免 cookies 可提取，实测与带 cookies 结果一致 |
 | 通用 | bestvideo+bestaudio | best | — |
 
 **Twitter**：公开视频推文无需登录即可提取（实测三条公开推文，无 cookies 与带 cookies
-结果完全相同）。仅受保护/受限内容需要 cookies。
+结果完全相同），因此会先无 Cookie 尝试；受保护/受限内容失败后才进入浏览器 Cookie 链。
 
-**YouTube 低清档现状**：`player_client=android,ios` 在 yt-dlp 2026.06.09 上已明显退化 ——
-android 端 https 格式被 SABR-only 流媒体实验跳过，ios 端要求 GVS PO Token，
-因此实际只能拿到遗留格式 18（360p）。想要 4K+字幕必须登录 youtube.com 后重新导出 cookies。
+**抖音**：`Export & Use` 解决 Cookie 导出和登录态问题，但抖音详情接口还可能要求浏览器为每次请求动态生成
+校验参数。当 yt-dlp 报 `Downloading web detail JSON` 与 403 / `Fresh cookies...` 时，原因可能是 Cookie 过期，也可能是当前提取器
+不支持所需动态签名。程序会先试完可用的独立 Cookie 来源；全部失败后跳过不可能改善结果的无 Cookie 回退。
+
+**YouTube 客户端策略**：由 yt-dlp 自动选择播放器客户端。新版 YouTube 上强制 `web` 客户端
+可能在缺少 JavaScript runtime 时只返回缩略图，强制 `android,ios` 也可能要求 PO Token；
+因此项目不再写死客户端。公开视频通常可直接解析，登录 Cookie 仍可能提供更多格式或字幕。
 
 ## 浏览器支持
 
@@ -92,8 +126,12 @@ android 端 https 格式被 SABR-only 流媒体实验跳过，ios 端要求 GVS 
 **DB 临时拷贝**：当浏览器 cookies 数据库被锁定时，自动拷贝到临时文件绕过锁。
 
 **CDP 回退**：Chrome 127+ / Edge 的 cookies 使用 v20 App-Bound Encryption，本地 DPAPI
-解密会失败。此时自动以 `--remote-debugging-port` 启动该浏览器，通过 CDP 让浏览器
-自己解密并导出 cookies（见 `_cdp_cookies.py`）。这是绕开 v20 的可靠通道。
+解密会失败。此时会尝试以 `--remote-debugging-port` 启动该浏览器，通过 CDP 让浏览器
+自己解密并导出 cookies（见 `_cdp_cookies.py`）。程序不会再强制结束正在运行的浏览器；
+若配置目录正被占用，关闭对应浏览器后再重试导出。
+
+下载被停止或失败时会保留 yt-dlp 的 `.part` 文件，下一次下载可断点续传；程序不会清理
+同一输出目录中其他任务的临时文件。
 
 **可选依赖**：`pip install browser-cookie3` 可获得额外浏览器支持（作为最终兜底）。
 

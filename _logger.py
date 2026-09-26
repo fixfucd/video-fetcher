@@ -87,10 +87,17 @@ def log(level, msg, exc_info=False):
     ts = datetime.now().strftime("%H:%M:%S")
     line = f"[{ts}] [{level.upper():7s}] {msg}"
     color = _COLORS.get(level, "")
-    if sys.stdout.isatty():
-        print(f"{color}{line}{_RESET}", file=sys.stderr if level=="error" else sys.stdout)
-    else:
-        print(line, file=sys.stderr if level=="error" else sys.stdout)
+    stream = sys.stderr if level == "error" else sys.stdout
+    # pythonw.exe intentionally provides no console streams. File logging must
+    # continue without turning that normal GUI condition into a startup crash.
+    if stream is not None:
+        try:
+            if stream.isatty():
+                print(f"{color}{line}{_RESET}", file=stream)
+            else:
+                print(line, file=stream)
+        except (AttributeError, OSError, ValueError):
+            pass
     if _LOG_HANDLE:
         _LOG_HANDLE.write(f"{line}\n")
         if exc_info:

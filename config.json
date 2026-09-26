@@ -2,9 +2,9 @@
   "_说明": "video-fetcher 配置文件。修改后即时生效。",
   "_browsers": "支持的浏览器: chrome, edge, brave, opera, firefox。",
   "_fallback": "当首选浏览器 cookies 被占用时，自动按优先级回退: chrome → edge → brave → opera → firefox。所有浏览器均失败后回退低清。",
-  "output_dir": "E:/工作/work2/downloads",
-  "cookies_from_browser": "chrome",
-  "cookies_file": "C:\\Users\\lenovo\\video-fetcher\\cookies\\cookies.txt",
+  "output_dir": "downloads",
+  "cookies_from_browser": null,
+  "cookies_file": "C:\\Users\\lenovo\\video-fetcher\\cookies\\chrome.txt",
   "platforms": {
     "bilibili": {
       "format": "bestvideo+bestaudio/best",
@@ -14,7 +14,7 @@
       "format": "bestvideo[height<=2160]+bestaudio/best",
       "merge_output_format": "mp4",
       "sub_langs": "zh-Hans,en",
-      "_extractor_note": "默认 web 客户端需 cookies 才能获取4K+字幕。Cookies 不可用时自动切 android+ios 客户端回退720p。"
+      "_extractor_note": "客户端由 yt-dlp 自动选择；强制 web/android/ios 在新版 YouTube 上可能缺少音视频格式或要求 PO Token。"
     },
     "douyin": {
       "format": "bestvideo+bestaudio/best",

@@ -1,5 +1,5 @@
 """_cookie_crypto.py — Zero-dep Chromium cookie decryption via ctypes DPAPI + AES-GCM"""
-import os, sys, json, base64, sqlite3, shutil, tempfile
+import os, sys, json, base64, hashlib, sqlite3, shutil, tempfile
 
 _AES = None
 def _init_aes():
@@ -74,7 +74,13 @@ def _read_db(db_path):
         except Exception: return None
     if not conn: return None
     try:
-        return conn.execute("SELECT host_key, name, encrypted_value, path, expires_utc, is_secure FROM cookies WHERE encrypted_value IS NOT NULL AND length(encrypted_value)>0").fetchall()
+        rows = conn.execute("SELECT host_key, name, encrypted_value, path, expires_utc, is_secure FROM cookies WHERE encrypted_value IS NOT NULL AND length(encrypted_value)>0").fetchall()
+        try:
+            version_row = conn.execute("SELECT value FROM meta WHERE key='version'").fetchone()
+            version = int(version_row[0]) if version_row else 0
+        except (sqlite3.Error, TypeError, ValueError):
+            version = 0
+        return rows, version
     finally:
         try: conn.close()
         except: pass
@@ -92,14 +98,39 @@ def _try_cdp_fallback(output_path, browser_key):
         return False
 
 
+def _decode_cookie_value(host_key, plaintext, require_host_digest=False):
+    """Decode Chromium v10 plaintext, including the schema-v24 host digest.
+
+    New Chromium databases prefix every decrypted value with
+    SHA256(host_key).  Treat undecodable data as invalid instead of inserting
+    U+FFFD, which requests cannot encode into an HTTP Cookie header.
+    """
+    host_digest = hashlib.sha256(host_key.encode('utf-8')).digest()
+    if require_host_digest:
+        if len(plaintext) < len(host_digest) or not plaintext.startswith(host_digest):
+            return None
+        plaintext = plaintext[len(host_digest):]
+    try:
+        value = plaintext.decode('utf-8')
+        value.encode('latin-1')
+        if any(char in value for char in ('\r', '\n', '\t', '\0')):
+            return None
+        return value
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        return None
+
+
 def export_cookies(browser_key, output_path):
     if _init_aes() is None: return False
     db, ls = _find_db(browser_key)
     if not db: return False
     key = _get_key(ls)
     if not key: return False
-    rows = _read_db(db)
+    db_result = _read_db(db)
+    if not db_result: return False
+    rows, db_version = db_result
     if not rows: return False
+    require_host_digest = db_version >= 24
 
     v10_cnt = v20_cnt = 0
     cnt = 0
@@ -116,8 +147,8 @@ def export_cookies(browser_key, output_path):
             v10_cnt += 1
             pl = _aes_gcm_decrypt(key, ev)
             if not pl: continue
-            try: val = pl.decode('utf-8', errors='replace')
-            except: continue
+            val = _decode_cookie_value(hk, pl, require_host_digest=require_host_digest)
+            if val is None: continue
             flag = 'TRUE' if hk.startswith('.') else 'FALSE'
             exp = str(int(ex / 1000000 - 11644473600)) if ex else '0'
             f.write(f"{hk}\t{flag}\t{ph}\t{'TRUE' if sc else 'FALSE'}\t{exp}\t{nm}\t{val}\n")
