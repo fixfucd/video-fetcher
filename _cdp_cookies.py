@@ -8,6 +8,11 @@ calls Storage.getCookies (browser decrypts cookies internally), then terminates.
 """
 import os, json, time, socket, base64, struct, secrets, subprocess, tempfile
 
+# Upper bound for a single WebSocket frame. Storage.getCookies for a real
+# profile stays far below this; the cap stops a rogue local process (which could
+# race us onto the debug port) from making us allocate unbounded memory.
+MAX_WS_PAYLOAD = 64 * 1024 * 1024
+
 # ──────────────────────────────────────────────────────────────
 #  Minimal RFC 6455 WebSocket client (zero external deps)
 # ──────────────────────────────────────────────────────────────
@@ -71,48 +76,62 @@ def _ws_send(sock, text):
     sock.sendall(bytes(header) + masked)
 
 
+def _recv_exact(sock, count):
+    """Read exactly ``count`` bytes or raise (never returns a short read).
+
+    A bare ``sock.recv(n)`` returns b'' on EOF; adding that to a buffer leaves
+    the length unchanged, so the old loops spun at 100% CPU and never returned.
+    """
+    data = b''
+    while len(data) < count:
+        chunk = sock.recv(count - len(data))
+        if not chunk:
+            raise ConnectionError("WebSocket recv: connection closed mid-frame")
+        data += chunk
+    return data
+
+
 def _ws_recv(sock, timeout=10):
-    """Read one complete WebSocket frame (server→client, unmasked)."""
+    """Read one complete data frame (server→client), skipping control frames.
+
+    Returns (opcode, payload). Raises ConnectionError on a close frame, a
+    truncated frame, an oversized payload, or a protocol error.
+    """
     sock.settimeout(timeout)
 
-    # Read first 2 bytes
-    data = b''
-    while len(data) < 2:
-        chunk = sock.recv(2 - len(data))
-        if not chunk:
-            raise ConnectionError("WebSocket recv: connection closed")
-        data += chunk
+    while True:
+        header = _recv_exact(sock, 2)
+        fin = (header[0] & 0x80) != 0
+        opcode = header[0] & 0x0F
+        masked = (header[1] & 0x80) != 0
+        payload_len = header[1] & 0x7F
 
-    opcode = data[0] & 0x0F
-    masked = (data[1] & 0x80) != 0
-    payload_len = data[1] & 0x7F
+        if payload_len == 126:
+            payload_len = struct.unpack('>H', _recv_exact(sock, 2))[0]
+        elif payload_len == 127:
+            payload_len = struct.unpack('>Q', _recv_exact(sock, 8))[0]
 
-    if payload_len == 126:
-        ext = b''
-        while len(ext) < 2:
-            ext += sock.recv(2 - len(ext))
-        payload_len = struct.unpack('>H', ext)[0]
-    elif payload_len == 127:
-        ext = b''
-        while len(ext) < 8:
-            ext += sock.recv(8 - len(ext))
-        payload_len = struct.unpack('>Q', ext)[0]
+        if payload_len > MAX_WS_PAYLOAD:
+            raise ConnectionError(f"WebSocket frame too large: {payload_len} bytes")
 
-    mk = None
-    if masked:
-        mk = sock.recv(4)
+        mask_key = _recv_exact(sock, 4) if masked else None
+        payload = _recv_exact(sock, payload_len) if payload_len else b''
+        if mask_key:
+            payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
 
-    payload = b''
-    while len(payload) < payload_len:
-        chunk = sock.recv(min(payload_len - len(payload), 65536))
-        if not chunk:
-            break
-        payload += chunk
-
-    if masked and mk:
-        payload = bytes(b ^ mk[i % 4] for i, b in enumerate(payload))
-
-    return opcode, payload
+        if opcode == 0x8:
+            raise ConnectionError("WebSocket closed by peer")
+        if opcode in (0x9, 0xA):
+            # Control frames may be interleaved with the response; a truncated
+            # payload must never reach the JSON parser.
+            continue
+        if not fin:
+            raise ConnectionError("WebSocket fragmented frame is not supported")
+        if opcode not in (0x1, 0x2):
+            raise ConnectionError(f"WebSocket unexpected opcode {opcode}")
+        if opcode == 0x2:
+            raise ConnectionError("WebSocket binary frame where text was expected")
+        return opcode, payload
 
 
 # ──────────────────────────────────────────────────────────────
@@ -120,13 +139,31 @@ def _ws_recv(sock, timeout=10):
 # ──────────────────────────────────────────────────────────────
 
 def _cdp_call(sock, _id, method, params=None, timeout=10):
-    """Send a CDP command and return the result dict."""
+    """Send a CDP command and return the response matching its id.
+
+    Frames that are not the answer (events, or a reply to an earlier id) are
+    skipped instead of being parsed as the result.
+    """
     msg = {"id": _id, "method": method}
     if params:
         msg["params"] = params
     _ws_send(sock, json.dumps(msg, ensure_ascii=False))
-    _, raw = _ws_recv(sock, timeout)
-    return json.loads(raw)
+
+    deadline = time.time() + timeout
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            raise TimeoutError(f"CDP {method}: no reply within {timeout}s")
+        _, raw = _ws_recv(sock, remaining)
+        try:
+            reply = json.loads(raw.decode('utf-8'))
+        except (UnicodeDecodeError, ValueError):
+            continue  # not JSON we understand; keep waiting for the reply
+        if isinstance(reply, dict) and reply.get("id") == _id:
+            error = reply.get("error")
+            if error:
+                raise RuntimeError(f"CDP {method} failed: {error}")
+            return reply
 
 
 # ──────────────────────────────────────────────────────────────
@@ -207,10 +244,36 @@ def _find_user_data_dir(browser_key):
     return None
 
 
-def _kill_browser(proc):
-    """Gracefully terminate browser process tree."""
+def _kill_browser(proc, wait_first=0):
+    """Terminate the browser process tree we started.
+
+    Chromium runs as several processes. Terminating only the process we spawned
+    leaves the GPU/utility/renderer children behind holding the profile lock,
+    which makes every later CDP attempt fail. On Windows ask taskkill for the
+    whole tree; elsewhere fall back to terminate/kill.
+
+    ``wait_first`` gives a browser that already received Browser.close a few
+    seconds to exit on its own before it is forced down.
+    """
     if proc is None:
         return
+    if wait_first:
+        try:
+            proc.wait(timeout=wait_first)
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            pass
+    if proc.poll() is None:
+        if os.name == 'nt':
+            try:
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                               capture_output=True, timeout=10)
+                return
+            except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+                pass
+    else:
+        return  # already exited; nothing left to terminate
     try:
         proc.terminate()
         try:
@@ -223,6 +286,14 @@ def _kill_browser(proc):
             proc.kill()
         except Exception:
             pass
+
+
+def _request_browser_close(sock):
+    """Ask the browser to shut itself down before we force the tree down."""
+    try:
+        _cdp_call(sock, 9999, 'Browser.close', timeout=5)
+    except Exception:
+        pass
 
 
 # ──────────────────────────────────────────────────────────────
@@ -257,6 +328,7 @@ def export_cookies_cdp(output_path, browser_key=None, browser_exe=None, user_dat
 
     port = _pick_port()
     proc = None
+    closed_gracefully = False
 
     try:
         # Never terminate the user's existing browser. If the profile is in use,
@@ -280,13 +352,15 @@ def export_cookies_cdp(output_path, browser_key=None, browser_exe=None, user_dat
             stderr=subprocess.DEVNULL,
         )
 
-        # Wait for debugger endpoint
+        # Wait for the debugger endpoint. Chrome may re-exec and hand the
+        # request to an already running instance, after which OUR process exits
+        # while the browser lives on — so treat "our process ended" as fatal only
+        # while the endpoint has never answered.
         deadline = time.time() + timeout
         ws_url = None
+        endpoint_seen = False
         while time.time() < deadline:
-            # Check if browser crashed
-            ret = proc.poll()
-            if ret is not None:
+            if proc.poll() is not None and not endpoint_seen:
                 return False
 
             try:
@@ -295,23 +369,31 @@ def export_cookies_cdp(output_path, browser_key=None, browser_exe=None, user_dat
                     f'http://127.0.0.1:{port}/json/version', timeout=2
                 )
                 info = json.loads(resp.read())
+                endpoint_seen = True
                 ws_url = info.get('webSocketDebuggerUrl', '')
                 if ws_url:
                     break
             except Exception:
-                time.sleep(0.5)
-                continue
+                pass
+            # Also paced on the "reachable but no ws url yet" path, which used to
+            # spin on the endpoint as fast as the loop could go.
+            time.sleep(0.5)
 
         if not ws_url:
             return False
 
         # Connect WebSocket and extract cookies
+        # A single frame may not take longer than this, however long the overall
+        # endpoint wait was allowed to be.
+        frame_timeout = min(timeout, 20)
         sock = _ws_connect(ws_url, timeout=10)
 
         try:
             # CDP: Storage.getCookies returns all cookies in all contexts
-            result = _cdp_call(sock, 1, 'Storage.getCookies', timeout=15)
+            result = _cdp_call(sock, 1, 'Storage.getCookies', timeout=frame_timeout)
             cookies = result.get('result', {}).get('cookies', [])
+            _request_browser_close(sock)
+            closed_gracefully = True
         finally:
             try:
                 sock.close()
@@ -321,13 +403,30 @@ def export_cookies_cdp(output_path, browser_key=None, browser_exe=None, user_dat
         if not cookies:
             return False
 
-        # Write Netscape cookie file
-        return _write_netscape(output_path, cookies)
+        # Write beside the target and swap it in only on success, so a failed
+        # extraction cannot destroy an existing cookie file.
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=os.path.basename(output_path) + ".cdp", suffix=".part",
+            dir=os.path.dirname(os.path.abspath(output_path)) or None,
+        )
+        os.close(fd)
+        try:
+            if not _write_netscape(tmp_path, cookies):
+                return False
+            os.replace(tmp_path, output_path)
+            return True
+        except OSError:
+            return False
+        finally:
+            try: os.unlink(tmp_path)
+            except OSError: pass
 
     except Exception:
         return False
     finally:
-        _kill_browser(proc)
+        # A browser that accepted Browser.close gets a moment to exit cleanly;
+        # anything still alive is forced down as a tree.
+        _kill_browser(proc, wait_first=5 if closed_gracefully else 0)
 
 
 def _write_netscape(output_path, cookies):

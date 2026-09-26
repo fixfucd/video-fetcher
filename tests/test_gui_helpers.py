@@ -1,5 +1,7 @@
 import os
+import shutil
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -43,6 +45,48 @@ def _make_root():
         return None
     root.withdraw()
     return root
+
+
+class _ProjectDirOs:
+    """os shim that resolves project-relative paths inside a scratch dir."""
+
+    def __init__(self, base):
+        self._base = base
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    @property
+    def path(self):
+        return _ProjectDirOsPath(self._base)
+
+
+class _ProjectDirOsPath:
+    def __init__(self, base):
+        self._base = base
+
+    def __getattr__(self, name):
+        return getattr(os.path, name)
+
+    def abspath(self, p):
+        return os.path.join(self._base, os.path.basename(os.path.abspath(p)))
+
+    def dirname(self, p):
+        # os.path.join is not redirected, so anything joined onto a "cookies"
+        # dirname must land inside the scratch dir as well. mkdtemp inherits this
+        # and creates the export scratch dirs under the same root.
+        return self._base
+
+    def isfile(self, p):
+        # The export path probes for a real cookies database; this test only
+        # exercises what happens after that probe succeeds.
+        return True
+
+    def getsize(self, p):
+        # Only used by the "is a cookies database present" probe, which this
+        # test always answers yes to. Production code never asks this shim for
+        # the size of an exported file (that goes through the real os).
+        return 1024
 
 
 class LogPipelineTests(unittest.TestCase):
@@ -143,6 +187,93 @@ class CookieChainWiringTests(unittest.TestCase):
             self.app._try_cookie_chain("https://www.douyin.com/video/1", "out", {}, "chrome", "douyin")
 
         self.assertTrue(gui.is_douyin_web_detail_failure(self.app._last_ytdlp_tail))
+
+
+class CookieExportSafetyTests(unittest.TestCase):
+    """Export & Use must never destroy a cookies file that still works."""
+
+    SAVED_NAME = "chrome.txt"
+
+    def setUp(self):
+        self.root = _make_root()
+        if self.root is None:
+            self.skipTest("no Tk display available")
+        self.app = gui.VideoFetcherGUI(self.root)
+        self.app.cookies_browser_var.set("chrome")
+        self.dir = tempfile.mkdtemp(prefix="vf_gui_export_test_")
+        os.makedirs(os.path.join(self.dir, "cookies"), exist_ok=True)
+        # A real file for the "is the browser installed" probe to find.
+        self.profile_dir = os.path.join(self.dir, "profile", "Network")
+        os.makedirs(self.profile_dir, exist_ok=True)
+        with open(os.path.join(self.profile_dir, "Cookies"), "w", encoding="utf-8") as f:
+            f.write("placeholder")
+        self.saved = os.path.join(self.dir, "cookies", self.SAVED_NAME)
+        self.existing = ("# Netscape HTTP Cookie File\n"
+                         ".example.com\tTRUE\t/\tTRUE\t0\tSID\tkeep-me\n")
+        with open(self.saved, "w", encoding="utf-8") as f:
+            f.write(self.existing)
+        # Redirect only gui's view of the project directory. Replacing the shared
+        # os.path.abspath would also redirect tempfile and break the real files.
+        self._os_patch = patch.object(gui, "os", _ProjectDirOs(self.dir))
+        self._os_patch.start()
+
+    def tearDown(self):
+        self._os_patch.stop()
+        shutil.rmtree(self.dir, ignore_errors=True)
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+    def _export_with(self, native_writer):
+        with patch.object(gui, "_native_export", native_writer), \
+                patch.object(gui, "bc3_export", return_value=False), \
+                patch.object(gui, "messagebox"), \
+                patch.object(gui, "_expand_path", side_effect=lambda p, *a: p), \
+                patch.object(gui, "detect_browser_profiles",
+                             return_value=[(os.path.join(self.dir, "profile"), "Default")]), \
+                patch.object(self.app, "_show_cookie_result"), \
+                patch.object(self.app, "_save_config"), \
+                patch.object(self.app, "_update_cookies_status"):
+            self.app._export_and_use()
+            self.app._flush_log()
+
+    def test_all_methods_failing_keeps_the_previous_export(self):
+        def produce_nothing(_key, path):
+            # No usable export: the method fails, and nothing may be published.
+            return False
+
+        self._export_with(produce_nothing)
+
+        with open(self.saved, encoding="utf-8") as f:
+            self.assertEqual(f.read(), self.existing)
+        self.assertIn("Kept the existing export", self.app.log.get("1.0", "end"))
+
+    def test_successful_export_replaces_the_previous_file(self):
+        payload = ("# Netscape HTTP Cookie File\n# video-fetcher\n\n"
+                   + ".example.com\tTRUE\t/\tTRUE\t0\tSID\tfresh\n" + "# pad\n" * 20)
+
+        def write_full(_key, path):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(payload)
+            return True
+
+        self._export_with(write_full)
+
+        with open(self.saved, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("fresh", text)
+        self.assertNotIn("keep-me", text)
+
+    def test_no_partial_files_are_left_in_the_target_directory(self):
+        def produce_nothing(_key, path):
+            return False
+
+        self._export_with(produce_nothing)
+
+        leftovers = [n for n in os.listdir(os.path.join(self.dir, "cookies"))
+                     if n != self.SAVED_NAME]
+        self.assertEqual(leftovers, [])
 
 
 if __name__ == "__main__":

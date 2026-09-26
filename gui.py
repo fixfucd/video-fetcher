@@ -4,7 +4,7 @@ video-fetcher GUI — visual video download client
 Start: python gui.py
 """
 
-import os, sys, io, traceback, subprocess, threading, time, queue, contextlib
+import os, sys, io, shutil, tempfile, traceback, subprocess, threading, time, queue, contextlib
 from _logger import log, set_log_file, close as close_log
 
 # Imported at module scope so the GUI class can be constructed by tests and by
@@ -396,52 +396,84 @@ class VideoFetcherGUI:
         save_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies")
         os.makedirs(save_dir, exist_ok=True)
         save_path = os.path.join(save_dir, f"{b}.txt")
+        previous = None
+        if os.path.isfile(save_path):
+            try:
+                previous = os.path.getsize(save_path)
+            except OSError:
+                previous = None
 
-        # Step 1: native DPAPI export (falls back to CDP internally if needed)
+        # Every method writes to a scratch path first. The previous export stays
+        # usable if this one fails, and the saved file is only replaced by a
+        # successfully exported one.
         extracted = False
-        if _native_export:
-            self._log("  → native DPAPI export...\n", "dim")
-            try:
-                if _native_export(b, save_path) and os.path.isfile(save_path) and os.path.getsize(save_path) > 100:
+        scratch = None
+        work = tempfile.mkdtemp(prefix=f"vf_export_{b}_")
+
+        def usable(path):
+            return os.path.isfile(path) and os.path.getsize(path) > 100
+
+        try:
+            # Step 1: native DPAPI export (falls back to CDP internally if needed)
+            if _native_export:
+                self._log("  → native DPAPI export...\n", "dim")
+                scratch = os.path.join(work, "native.txt")
+                try:
+                    if _native_export(b, scratch) and usable(scratch):
+                        extracted = True
+                        self._show_cookie_result(scratch, label, method="native DPAPI")
+                    else:
+                        self._log("  native export: no cookies (v20 encrypted or locked)\n", "warn")
+                except Exception as e:
+                    self._log(f"  native error: {e}\n", "warn")
+
+            # Step 2: CDP fallback (any installed Chromium browser)
+            if not extracted and cfg.get("engine") == "chromium":
+                self._log(f"  → CDP fallback (launching {label}, ~15s)...\n", "dim")
+                scratch = os.path.join(work, "cdp.txt")
+                try:
+                    from _cdp_cookies import export_cookies_cdp
+                    if export_cookies_cdp(scratch, browser_key=b) and usable(scratch):
+                        extracted = True
+                        self._show_cookie_result(scratch, label, method="CDP (browser)")
+                    else:
+                        self._log("  CDP fallback failed\n", "warn")
+                except ImportError:
+                    self._log("  CDP module not available\n", "warn")
+                except Exception as e:
+                    self._log(f"  CDP error: {e}\n", "warn")
+
+            # Step 3: bc3 fallback
+            if not extracted:
+                self._log("  → browser_cookie3 fallback...\n", "dim")
+                scratch = os.path.join(work, "bc3.txt")
+                if bc3_export(b, scratch) and usable(scratch):
                     extracted = True
-                    self._show_cookie_result(save_path, label, method="native DPAPI")
+                    self._show_cookie_result(scratch, label, method="browser_cookie3")
                 else:
-                    self._log("  native export: no cookies (v20 encrypted or locked)\n", "warn")
-            except Exception as e:
-                self._log(f"  native error: {e}\n", "warn")
+                    self._log("  bc3: no cookies or not installed\n", "warn")
 
-        # Step 2: CDP fallback (any installed Chromium browser)
-        if not extracted and cfg.get("engine") == "chromium":
-            self._log(f"  → CDP fallback (launching {label}, ~15s)...\n", "dim")
+            if not extracted:
+                self._log("\n  ❌ All methods failed\n", "error")
+                # Never delete a previously working export over a failed attempt.
+                if previous is not None:
+                    self._log(f"  Kept the existing export ({previous:,}B): {save_path}\n", "warn")
+                    self.cookies_status.config(text=f"{label}: export failed (kept existing)",
+                                               foreground="#f44747")
+                else:
+                    self.cookies_status.config(text=f"{label}: FAILED", foreground="#f44747")
+                return
+
+            # Success — publish it atomically, then activate it
             try:
-                from _cdp_cookies import export_cookies_cdp
-                if export_cookies_cdp(save_path, browser_key=b):
-                    extracted = True
-                    self._show_cookie_result(save_path, label, method="CDP (browser)")
-                else:
-                    self._log("  CDP fallback failed\n", "warn")
-            except ImportError:
-                self._log("  CDP module not available\n", "warn")
-            except Exception as e:
-                self._log(f"  CDP error: {e}\n", "warn")
+                os.replace(scratch, save_path)
+            except OSError as e:
+                self._log(f"  Could not write {save_path}: {e}\n", "error")
+                self.cookies_status.config(text=f"{label}: save failed", foreground="#f44747")
+                return
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
 
-        # Step 3: bc3 fallback
-        if not extracted:
-            self._log("  → browser_cookie3 fallback...\n", "dim")
-            if bc3_export(b, save_path) and os.path.isfile(save_path) and os.path.getsize(save_path) > 100:
-                extracted = True
-                self._show_cookie_result(save_path, label, method="browser_cookie3")
-            else:
-                self._log("  bc3: no cookies or not installed\n", "warn")
-
-        if not extracted:
-            self._log("\n  ❌ All methods failed\n", "error")
-            self.cookies_status.config(text=f"{label}: FAILED", foreground="#f44747")
-            try: os.unlink(save_path)
-            except: pass
-            return
-
-        # Success — activate exported cookies
         self.cookies_file_var.set(save_path)
         self.cookies_browser_var.set("")  # clear browser: using file now
         self._save_config()

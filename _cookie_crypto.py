@@ -77,9 +77,12 @@ def _read_db(db_path):
         rows = conn.execute("SELECT host_key, name, encrypted_value, path, expires_utc, is_secure FROM cookies WHERE encrypted_value IS NOT NULL AND length(encrypted_value)>0").fetchall()
         try:
             version_row = conn.execute("SELECT value FROM meta WHERE key='version'").fetchone()
-            version = int(version_row[0]) if version_row else 0
+            version = int(version_row[0]) if version_row else None
         except (sqlite3.Error, TypeError, ValueError):
-            version = 0
+            # No usable meta row: report "unknown" instead of 0. Claiming an old
+            # schema made every digest-prefixed value undecodable, and each one
+            # was then dropped without a word.
+            version = None
         return rows, version
     finally:
         try: conn.close()
@@ -98,15 +101,22 @@ def _try_cdp_fallback(output_path, browser_key):
         return False
 
 
-def _decode_cookie_value(host_key, plaintext, require_host_digest=False):
+def _decode_cookie_value(host_key, plaintext, require_host_digest=None):
     """Decode Chromium v10 plaintext, including the schema-v24 host digest.
 
-    New Chromium databases prefix every decrypted value with
-    SHA256(host_key).  Treat undecodable data as invalid instead of inserting
-    U+FFFD, which requests cannot encode into an HTTP Cookie header.
+    New Chromium databases prefix every decrypted value with SHA256(host_key).
+    ``require_host_digest`` selects the decoding rule:
+
+      True  — the digest must be present (schema is known to be >= 24);
+      False — the digest must be absent (older schema);
+      None  — unknown schema: strip a matching digest when present, otherwise
+              keep the value as-is.
     """
     host_digest = hashlib.sha256(host_key.encode('utf-8')).digest()
-    if require_host_digest:
+    if require_host_digest is None:
+        if plaintext.startswith(host_digest):
+            plaintext = plaintext[len(host_digest):]
+    elif require_host_digest:
         if len(plaintext) < len(host_digest) or not plaintext.startswith(host_digest):
             return None
         plaintext = plaintext[len(host_digest):]
@@ -130,32 +140,62 @@ def export_cookies(browser_key, output_path):
     if not db_result: return False
     rows, db_version = db_result
     if not rows: return False
-    require_host_digest = db_version >= 24
+    # None means the schema version could not be read; let the decoder decide
+    # per value instead of assuming an old schema.
+    require_host_digest = None if db_version is None else db_version >= 24
 
-    v10_cnt = v20_cnt = 0
+    # Write beside the target and swap it in only once the export succeeded.
+    # Opening the target directly used to truncate it first, so a failed export
+    # destroyed the working cookies file that downloads depend on.
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=os.path.basename(output_path) + ".", suffix=".part",
+        dir=os.path.dirname(os.path.abspath(output_path)) or None,
+    )
+    os.close(fd)
+
+    decrypt_failed = unsupported = 0
     cnt = 0
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write("# Netscape HTTP Cookie File\n# video-fetcher\n\n")
-        for hk, nm, ev, ph, ex, sc in rows:
-            if not ev: continue
-            if ev[:3] == b'v20':
-                v20_cnt += 1; continue  # v20 needs App-Bound Encryption (Chrome COM service)
-            if ev[:3] != b'v10':
-                # Unknown scheme (e.g. a vendor-custom prefix). Not decryptable
-                # here; counted so the CDP fallback still triggers below.
-                v20_cnt += 1; continue
-            v10_cnt += 1
-            pl = _aes_gcm_decrypt(key, ev)
-            if not pl: continue
-            val = _decode_cookie_value(hk, pl, require_host_digest=require_host_digest)
-            if val is None: continue
-            flag = 'TRUE' if hk.startswith('.') else 'FALSE'
-            exp = str(int(ex / 1000000 - 11644473600)) if ex else '0'
-            f.write(f"{hk}\t{flag}\t{ph}\t{'TRUE' if sc else 'FALSE'}\t{exp}\t{nm}\t{val}\n")
-            cnt += 1
+    try:
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            f.write("# Netscape HTTP Cookie File\n# video-fetcher\n\n")
+            for hk, nm, ev, ph, ex, sc in rows:
+                if not ev: continue
+                if ev[:3] == b'v20':
+                    unsupported += 1; continue  # v20 needs App-Bound Encryption (Chrome COM service)
+                if ev[:3] != b'v10':
+                    # Unknown scheme (e.g. a vendor-custom prefix). Not decryptable
+                    # here; counted so the CDP fallback still triggers below.
+                    unsupported += 1; continue
+                pl = _aes_gcm_decrypt(key, ev)
+                if not pl:
+                    decrypt_failed += 1; continue
+                val = _decode_cookie_value(hk, pl, require_host_digest=require_host_digest)
+                if val is None:
+                    decrypt_failed += 1; continue
+                flag = 'TRUE' if hk.startswith('.') else 'FALSE'
+                exp = str(int(ex / 1000000 - 11644473600)) if ex else '0'
+                f.write(f"{hk}\t{flag}\t{ph}\t{'TRUE' if sc else 'FALSE'}\t{exp}\t{nm}\t{val}\n")
+                cnt += 1
+    except OSError:
+        # Unwritable target or full disk: leave any existing file untouched.
+        try: os.unlink(tmp_path)
+        except OSError: pass
+        return False
 
-    if v20_cnt > 0 and cnt == 0:
-        # Nothing decryptable locally (App-Bound Encryption or unknown scheme)
-        # → let the browser decrypt its own cookies via CDP.
-        return _try_cdp_fallback(output_path, browser_key)
-    return cnt > 0
+    if cnt <= 0:
+        # Nothing usable was produced (App-Bound Encryption, unknown scheme, or
+        # every value failed to decrypt) → let the browser decrypt its own
+        # cookies via CDP, and keep the previous file if that fails too.
+        try: os.unlink(tmp_path)
+        except OSError: pass
+        if unsupported or decrypt_failed:
+            return _try_cdp_fallback(output_path, browser_key)
+        return False
+
+    try:
+        os.replace(tmp_path, output_path)
+    except OSError:
+        try: os.unlink(tmp_path)
+        except OSError: pass
+        return False
+    return True
