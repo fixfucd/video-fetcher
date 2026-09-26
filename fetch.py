@@ -47,19 +47,36 @@ BROWSER_CONFIG = {
     "firefox": {"yt_name":"firefox","native":True,"label":"Firefox","engine":"gecko","base_dirs":[],"cookies_paths":[],"priority":5},
 }
 
+_EXE_CACHE = {}
+
 def _browser_executable_exists(browser_key):
-    """Return whether a supported Chromium executable is installed."""
+    """Return whether a supported Chromium executable is installed.
+
+    Cached: browser detection runs several times per fetch, and probing the
+    filesystem again cannot change the answer within one process.
+    """
+    if browser_key in _EXE_CACHE:
+        return _EXE_CACHE[browser_key]
+    exists = False
     try:
         from _cdp_cookies import _BROWSER_FINDERS
         finder = _BROWSER_FINDERS.get(browser_key)
-        return bool(finder and finder())
+        exists = bool(finder and finder())
     except (ImportError, OSError):
-        return False
+        exists = False
+    _EXE_CACHE[browser_key] = exists
+    return exists
 
 PLATFORM_PRESETS = {
     "bilibili":{"high":{"format":"bestvideo+bestaudio/best","merge_output_format":"mp4","embed_metadata":True,"no_playlist":True},"fallback":{"format":"bestvideo[height<=720]+bestaudio/best","merge_output_format":"mp4","embed_metadata":True,"no_playlist":True}},
     "youtube":{"high":{"format":"bestvideo[height<=2160]+bestaudio/best","merge_output_format":"mp4","embed_metadata":True,"write_auto_subs":True,"sub_langs":"zh-Hans,en","no_playlist":True},"fallback":{"format":"bestvideo[height<=720]+bestaudio/best","merge_output_format":"mp4","embed_metadata":True,"no_playlist":True}},
-    "douyin":{"high":{"format":"bestvideo+bestaudio/best","merge_output_format":"mp4","embed_metadata":True,"no_playlist":True,"add_header":["User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36","Referer:https://www.douyin.com/"]},"fallback":{"format":"bestvideo+bestaudio/best","merge_output_format":"mp4","embed_metadata":True,"no_playlist":True,"add_header":["User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36","Referer:https://www.douyin.com/"]}},
+    # NOTE: douyin has no separate low-quality tier. yt-dlp's Douyin extractor
+    # offers exactly one format string, so a no-cookie "LQ" retry would repeat the
+    # identical request that just failed (verified in logs/gui_20260924.log:
+    # "falling back to low quality" -> same HTTP 403 three seconds later).
+    # same_tier() below detects that and skips the repeat instead of faking a
+    # quality downgrade. Login problems are reported by fetch()'s douyin branch.
+    "douyin":{"high":{"format":"bestvideo+bestaudio/best","merge_output_format":"mp4","embed_metadata":True,"no_playlist":True,"add_header":["User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36","Referer:https://www.douyin.com/"]}},
     # NOTE: twitter DOES have a usable no-cookie tier. Public video tweets are
     # extractable without auth (verified against three public tweets: identical
     # 720p results with and without cookies). Setting fallback=None here made
@@ -117,6 +134,7 @@ def detect_installed_browsers():
         c = BROWSER_CONFIG[k]; e = {"installed":False,"profiles":0,"label":c["label"],"key":k}
         if c.get("engine")=="chromium":
             p = detect_browser_profiles(k)
+            # Only pay for an executable probe when profiles gave no evidence.
             e["installed"], e["profiles"] = bool(p) or _browser_executable_exists(k), len(p)
         elif c.get("engine")=="gecko":
             dp,_ = find_cookies_file(k)
@@ -124,10 +142,18 @@ def detect_installed_browsers():
         r[k] = e
     return r
 
-def get_available_browsers(exclude=None):
-    i = detect_installed_browsers()
+def available_browsers_from(installed, exclude=None):
+    """Installed browser keys in priority order, derived from a detection result.
+
+    Lets callers reuse one detect_installed_browsers() pass instead of walking
+    every browser profile again for the same answer.
+    """
     es = set() if exclude is None else ({exclude} if isinstance(exclude,str) else set(exclude))
-    return [k for k in sorted(i,key=lambda k:BROWSER_CONFIG[k]["priority"]) if i[k]["installed"] and k not in es]
+    return [k for k in sorted(installed,key=lambda k:BROWSER_CONFIG[k]["priority"])
+            if installed[k].get("installed") and k not in es]
+
+def get_available_browsers(exclude=None):
+    return available_browsers_from(detect_installed_browsers(), exclude=exclude)
 
 def get_alt_browsers(cur): return get_available_browsers(exclude=cur)
 
@@ -172,21 +198,27 @@ def _has_bc3():
     return _BC3
 
 _CDP = None
-def _has_cdp():
-    """Check if CDP fallback is available (any supported Chromium browser)."""
+def _has_cdp(detected=None):
+    """Check if CDP fallback is available (any supported Chromium browser).
+
+    Pass a detect_installed_browsers() result to answer from that pass; the
+    result is cached because probing every executable again cannot change it.
+    """
     global _CDP
+    if detected is not None:
+        keys = _cdp_browser_keys()
+        return bool(keys) and any(detected.get(k, {}).get("installed") for k in keys)
     if _CDP is None:
-        try:
-            from _cdp_cookies import _BROWSER_FINDERS
-            for finder in _BROWSER_FINDERS.values():
-                if finder():
-                    _CDP = True
-                    break
-            else:
-                _CDP = False
-        except ImportError:
-            _CDP = False
+        _CDP = bool(_cdp_browser_keys())
     return _CDP
+
+def _cdp_browser_keys():
+    """Browser keys whose executable the CDP module can drive (empty if unavailable)."""
+    try:
+        from _cdp_cookies import _BROWSER_FINDERS
+    except ImportError:
+        return ()
+    return tuple(k for k in _BROWSER_FINDERS if _browser_executable_exists(k))
 
 def bc3_export(browser_key, outpath):
     """Export cookies via browser_cookie3 → Netscape file. Works for ALL browsers."""
@@ -335,6 +367,20 @@ def get_platform_presets(platform, config):
     hi.update(u)
     return hi, fb
 
+def same_tier(a, b):
+    """Return whether two presets request the identical download.
+
+    Used to avoid repeating a request that cannot produce a different result:
+    a fallback tier whose format (and extractor args) match the tier already
+    attempted without cookies adds no new capability, only another failure.
+    """
+    if None in (a, b):
+        return False
+    keys = ("format", "extractor_args")
+    return all(a.get(k) == b.get(k) for k in keys)
+
+_same_tier = same_tier  # backwards-compatible private alias
+
 def build_yt_dlp_args(url, output_dir, opts, config, use_cookies, extra_args=None):
     args = ["yt-dlp", url, "-o", str(Path(output_dir)/"%(title).100s [%(id)s].%(ext)s")]
     if use_cookies:
@@ -416,69 +462,119 @@ def _try_run(args, label=""):
 
 # ─── core: per-browser attempt ───
 
-def _try_browser(url, output_dir, high_opts, config, browser_key, platform="generic", extra_args=None):
-    """Try download via one browser. native > bc3 > yt-dlp DPAPI."""
-    cfg = BROWSER_CONFIG.get(browser_key,{})
-    label = cfg.get("label", browser_key)
+def try_browser_cookies(url, output_dir, high_opts, config, browser_key, platform="generic",
+                        extra_args=None, emit=None, run=None, is_cancelled=None):
+    """Try one browser as a cookie source. native > bc3 > yt-dlp DPAPI.
 
+    This is the single implementation of the cookie chain; fetch() and the GUI
+    both call it, so a change here reaches both instead of drifting apart.
+
+    emit(text)            — optional progress sink (defaults to stdout print)
+    run(args, label)      — optional download runner, returns (exit_code, tail)
+    is_cancelled()        — optional predicate; a True result aborts the chain
+
+    Returns (ok, diagnostic): ``ok`` is True when a download succeeded, and
+    ``diagnostic`` always carries the most useful reason a step was skipped or
+    failed (so callers can log why instead of an empty string).
+    """
+    if emit is None:
+        emit = lambda text="": print(text)
+    if run is None:
+        run = _try_run
+    if is_cancelled is None:
+        is_cancelled = lambda: False
+
+    cfg = BROWSER_CONFIG.get(browser_key, {})
+    label = cfg.get("label", browser_key)
     log("debug", f"try browser: {browser_key} (label={label})")
+
+    def attempt(cookie_file, tail_label):
+        """Run yt-dlp with one exported cookie file."""
+        cfg_used = dict(config)
+        cfg_used["cookies_file"] = cookie_file
+        cfg_used["cookies_from_browser"] = None
+        args = build_yt_dlp_args(url, output_dir, high_opts, cfg_used, use_cookies=True, extra_args=extra_args)
+        return run(args, tail_label)
+
     # Step 0: zero-dep native export (_cookie_crypto, ctypes DPAPI)
     if _native_export:
         tmp = _make_temp_cookie_file(browser_key, "native")
         try:
-            if _native_export(browser_key, tmp) and os.path.isfile(tmp) and os.path.getsize(tmp)>100:
-                # Check login status for platforms that need it
+            if _native_export(browser_key, tmp) and os.path.isfile(tmp) and os.path.getsize(tmp) > 100:
                 logged, missing, hint = check_cookie_login(tmp, platform)
                 if not logged:
-                    print(f"[video-fetcher] {label}: native OK but {platform} not logged in (missing: {', '.join(missing)})")
-                    print(f"[video-fetcher]  → {hint}")
-                    return False, ""
-                print(f"[video-fetcher] {label}: native OK ({os.path.getsize(tmp)}B)")
-                bc = dict(config); bc["cookies_file"]=tmp; bc["cookies_from_browser"]=None
-                args = build_yt_dlp_args(url, output_dir, high_opts, bc, use_cookies=True, extra_args=extra_args)
-                rc, stderr = _try_run(args, label)
-                if rc==0: print(f"[video-fetcher] {label} HD OK"); return True, stderr
-                if is_cookie_lock_error(stderr): print(f"[video-fetcher] [!] {label} locked")
-                else: print(f"[video-fetcher] {label} native FAIL (exit={rc})")
+                    note = f"{label}: native OK but {platform} not logged in (missing: {', '.join(missing)}). {hint}"
+                    emit(f"[video-fetcher] {note}")
+                    return False, note
+                emit(f"[video-fetcher] {label}: native OK ({os.path.getsize(tmp)}B)")
+                rc, stderr = attempt(tmp, label)
+                if rc == 0:
+                    emit(f"[video-fetcher] {label} HD OK")
+                    return True, stderr
+                if is_cookie_lock_error(stderr):
+                    emit(f"[video-fetcher] [!] {label} locked")
+                else:
+                    emit(f"[video-fetcher] {label} native FAIL (exit={rc})")
                 return False, stderr
-            else:
-                print(f"[video-fetcher] {label}: native skipped (v20 App-Bound Encryption or DB locked)")
+            emit(f"[video-fetcher] {label}: native skipped (v20 App-Bound Encryption or DB locked)")
         except Exception as e:
-            print(f"[video-fetcher] {label}: native error ({e})")
+            emit(f"[video-fetcher] {label}: native error ({e})")
         finally:
             _remove_temp_cookie_file(tmp)
+
+    if is_cancelled():
+        return False, "cancelled"
 
     # Step 1: browser_cookie3 (pip install browser-cookie3)
     tmp = _make_temp_cookie_file(browser_key, "bc3")
     try:
-        if bc3_export(browser_key, tmp) and os.path.isfile(tmp) and os.path.getsize(tmp)>100:
+        if bc3_export(browser_key, tmp) and os.path.isfile(tmp) and os.path.getsize(tmp) > 100:
             logged, missing, hint = check_cookie_login(tmp, platform)
             if not logged:
-                print(f"[video-fetcher] {label}: bc3 OK but {platform} not logged in (missing: {', '.join(missing)})")
-                print(f"[video-fetcher]  → {hint}")
-                return False, ""
-            print(f"[video-fetcher] {label}: bc3 OK ({os.path.getsize(tmp)}B)")
-            bc = dict(config); bc["cookies_file"]=tmp; bc["cookies_from_browser"]=None
-            args = build_yt_dlp_args(url, output_dir, high_opts, bc, use_cookies=True, extra_args=extra_args)
-            rc, stderr = _try_run(args, label)
-            if rc==0: print(f"[video-fetcher] {label} HD OK"); return True, stderr
-            if is_cookie_lock_error(stderr): print(f"[video-fetcher] [!] {label} locked")
-            else: print(f"[video-fetcher] {label} bc3 FAIL (exit={rc})")
+                note = f"{label}: bc3 OK but {platform} not logged in (missing: {', '.join(missing)}). {hint}"
+                emit(f"[video-fetcher] {note}")
+                return False, note
+            emit(f"[video-fetcher] {label}: bc3 OK ({os.path.getsize(tmp)}B)")
+            rc, stderr = attempt(tmp, label)
+            if rc == 0:
+                emit(f"[video-fetcher] {label} HD OK")
+                return True, stderr
+            if is_cookie_lock_error(stderr):
+                emit(f"[video-fetcher] [!] {label} locked")
+            else:
+                emit(f"[video-fetcher] {label} bc3 FAIL (exit={rc})")
             return False, stderr
     finally:
         _remove_temp_cookie_file(tmp)
 
+    if is_cancelled():
+        return False, "cancelled"
+
     # Step 2: yt-dlp native DPAPI (only for native browsers)
     if cfg.get("native") and cfg.get("yt_name"):
-        ac = dict(config); ac["cookies_from_browser"]=browser_key; ac["cookies_file"]=None
-        args = build_yt_dlp_args(url, output_dir, high_opts, ac, use_cookies=True, extra_args=extra_args)
-        rc, stderr = _try_run(args, f"{label} (yt-dlp)")
-        if rc==0: print(f"[video-fetcher] {label} HD OK (yt-dlp)"); return True, stderr
-        if is_cookie_lock_error(stderr): print(f"[video-fetcher] [!] {label} DPAPI locked")
-        else: print(f"[video-fetcher] {label} DPAPI FAIL (exit={rc})")
+        cfg_used = dict(config)
+        cfg_used["cookies_from_browser"] = browser_key
+        cfg_used["cookies_file"] = None
+        args = build_yt_dlp_args(url, output_dir, high_opts, cfg_used, use_cookies=True, extra_args=extra_args)
+        rc, stderr = run(args, f"{label} (yt-dlp)")
+        if rc == 0:
+            emit(f"[video-fetcher] {label} HD OK (yt-dlp)")
+            return True, stderr
+        if is_cookie_lock_error(stderr):
+            emit(f"[video-fetcher] [!] {label} DPAPI locked")
+        else:
+            emit(f"[video-fetcher] {label} DPAPI FAIL (exit={rc})")
         return False, stderr
 
-    return False, "all methods failed"
+    return False, "all cookie sources failed"
+
+
+def _try_browser(url, output_dir, high_opts, config, browser_key, platform="generic", extra_args=None):
+    """extract() wrapper around try_browser_cookies() that prints to stdout."""
+    return try_browser_cookies(
+        url, output_dir, high_opts, config, browser_key,
+        platform=platform, extra_args=extra_args,
+    )
 
 def _log_ytdlp_fail(source, exit_code, stderr_text):
     """Log yt-dlp failure with stderr for diagnostics."""
@@ -522,11 +618,12 @@ def fetch(url, platform="generic", output_dir=None, config_path=None, extra_args
     high, fallback = get_platform_presets(platform, config)
     log("info", f"fetch start: url={url[:80]} platform={platform} output={output_dir}")
 
+    # One detection pass feeds the banner, the cookie chain and the CDP check.
     installed = detect_installed_browsers()
-    available = [k for k,v in installed.items() if v["installed"]]
+    available = available_browsers_from(installed)
     labels = ", ".join(BROWSER_CONFIG.get(k, {}).get("label", k) for k in available) if available else "(none)"
     bc3_status = "available" if _has_bc3() else "NOT INSTALLED (pip install browser-cookie3)"
-    cdp_status = "available" if _has_cdp() else "NOT AVAILABLE"
+    cdp_status = "available" if _has_cdp(installed) else "NOT AVAILABLE"
     print(f"[video-fetcher] browsers: {labels}")
     print(f"[video-fetcher] browser_cookie3: {bc3_status}")
     print(f"[video-fetcher] CDP cookie fallback: {cdp_status}")
@@ -550,6 +647,9 @@ def fetch(url, platform="generic", output_dir=None, config_path=None, extra_args
     tried = set()
     douyin_web_detail_seen = False
     douyin_web_detail_rc = 1
+    # Exit code of the last real download attempt, so a skipped redundant
+    # fallback can still report why the whole run failed.
+    last_rc = public_rc if public_rc is not None else 1
 
     # cookies file
     cf = config.get("cookies_file")
@@ -562,6 +662,7 @@ def fetch(url, platform="generic", output_dir=None, config_path=None, extra_args
             print(f"[video-fetcher] using cookies file: {cf}")
             rc,stderr_f = _try_run(build_yt_dlp_args(url, output_dir, high, config, use_cookies=True, extra_args=extra_args), "file")
             if rc==0: return 0
+            last_rc = rc
             _log_ytdlp_fail("cookies-file", rc, stderr_f)
             if platform == "douyin" and is_douyin_web_detail_failure(stderr_f):
                 douyin_web_detail_seen = True
@@ -579,8 +680,9 @@ def fetch(url, platform="generic", output_dir=None, config_path=None, extra_args
         label = BROWSER_CONFIG.get(pref,{}).get("label", pref)
         print(f"[video-fetcher] '{label}' not installed")
 
-    # alternates
-    alts = [b for b in get_available_browsers() if b not in tried]
+    # alternates — reuse the detection pass already made above instead of
+    # scanning every browser profile again.
+    alts = [b for b in available if b not in tried]
     if alts:
         print(f"\n[video-fetcher] alternates: {', '.join(BROWSER_CONFIG.get(b, {}).get('label', b) for b in alts)}")
     for b in alts:
@@ -600,9 +702,14 @@ def fetch(url, platform="generic", output_dir=None, config_path=None, extra_args
     # fallback
     if fallback is None:
         print(f"\n[video-fetcher] {platform} needs login, abort."); return 1
-    if public_first and fallback == high and public_rc is not None:
+    if fallback == high and public_rc is not None:
         print(f"\n[video-fetcher] public attempt already used the fallback settings; not repeating it")
         return public_rc
+    # Same request, different label: the fallback adds nothing the no-cookie
+    # attempt inside _try_browser has not already tried.
+    if _same_tier(high, fallback):
+        print(f"\n[video-fetcher] fallback tier is identical to the HD settings; skipping the repeat")
+        return public_rc if public_rc is not None else last_rc
     print(f"\n[video-fetcher] fallback LQ (no cookies)")
     fb_args = build_yt_dlp_args(url, output_dir, fallback, config, use_cookies=False, extra_args=extra_args)
     rc, stderr_fb = _try_run(fb_args, "LQ-fallback")

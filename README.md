@@ -94,20 +94,27 @@ Twitter/通用链接先尝试公开访问 ──成功──▶ 完成
            报错 (Twitter 例外见下: 公开推文无 cookies 也可取)
 ```
 
+> **兜底档位为空或与高清档相同则不重试**：当某平台的低清档没有更低的画质可选时
+> （见下表「抖音」），程序会跳过这次注定同结果的请求并直接报错，不再打印
+> 「LQ fallback」后再原样失败一次。
+
 | 平台 | 高清 | 低清回退 | 实测 |
 |------|------|----------|------|
 | B站 | 4K (cookies) | 720p | 无 cookies → HTTP 412，**必须** cookies |
 | YouTube | 4K+字幕 (web+cookies) | bestvideo[height<=720] (android,ios) | 无 cookies 实测仅得 360p，见下 |
-| 抖音 | bestvideo+bestaudio (cookies) | best | 403 可能来自 Cookie 过期，也可能是 yt-dlp 缺少动态请求签名 |
+| 抖音 | bestvideo+bestaudio (cookies) | **无独立低清档**（跳过重复请求） | 403 可能来自 Cookie 过期，也可能是 yt-dlp 缺少动态请求签名 |
 | Twitter | best (cookies) | best (无 cookies) | 公开视频推文免 cookies 可提取，实测与带 cookies 结果一致 |
 | 通用 | bestvideo+bestaudio | best | — |
 
 **Twitter**：公开视频推文无需登录即可提取（实测三条公开推文，无 cookies 与带 cookies
 结果完全相同），因此会先无 Cookie 尝试；受保护/受限内容失败后才进入浏览器 Cookie 链。
 
-**抖音**：`Export & Use` 解决 Cookie 导出和登录态问题，但抖音详情接口还可能要求浏览器为每次请求动态生成
-校验参数。当 yt-dlp 报 `Downloading web detail JSON` 与 403 / `Fresh cookies...` 时，原因可能是 Cookie 过期，也可能是当前提取器
-不支持所需动态签名。程序会先试完可用的独立 Cookie 来源；全部失败后跳过不可能改善结果的无 Cookie 回退。
+**抖音**：yt-dlp 的抖音提取器只提供**一个** format 串，不存在真正的低清档位；早先写作
+`720p` 的回退并未生效（实测同一请求 3 秒后原样失败）。因此本平台不设独立回退档，程序在
+所有 Cookie 来源失败后直接给出诊断。`Export & Use` 解决 Cookie 导出和登录态问题，但抖音
+详情接口还可能要求浏览器为每次请求动态生成校验参数。当 yt-dlp 报 `Downloading web detail JSON`
+与 403 / `Fresh cookies...` 时，原因可能是 Cookie 过期，也可能是当前提取器不支持所需动态签名。
+
 
 **YouTube 客户端策略**：由 yt-dlp 自动选择播放器客户端。新版 YouTube 上强制 `web` 客户端
 可能在缺少 JavaScript runtime 时只返回缩略图，强制 `android,ios` 也可能要求 PO Token；
@@ -140,8 +147,8 @@ Twitter/通用链接先尝试公开访问 ──成功──▶ 完成
 ```json
 {
   "output_dir": "downloads",
-  "cookies_from_browser": "chrome",
-  "cookies_file": null,
+  "cookies_from_browser": null,
+  "cookies_file": "C:\\path\\to\\cookies\\chrome.txt",
   "platforms": {},
   "yt_dlp_global": {
     "concurrent_fragments": 8
@@ -149,20 +156,39 @@ Twitter/通用链接先尝试公开访问 ──成功──▶ 完成
 }
 ```
 
+- `cookies_file` 与 `cookies_from_browser` 是**两个不同用途**的字段：前者是
+  「已导出的 Netscape cookies 文件」，只要存在且登录校验通过就直接用它下载；后者是
+  「首选回退浏览器」（GUI 下拉框里的那一项），仅在文件不可用时才进入回退链。
+  两者同时配置时，**文件优先**。
+- `platforms.<平台>` 只覆盖该平台的**高清档**；低清档保留自己的画质上限与提取器参数，
+  不会被配置覆盖。
+- 键名以下划线开头的字段（如 `_说明`、`_extractor_note`）是文档键，不会作为 yt-dlp 参数。
+
+## 测试
+
+```bash
+python -m unittest discover -s tests
+```
+
+GUI 相关用例需要可用的 Tk（无显示环境时自动跳过）。
+
 ## 项目结构
 
 ```
 video-fetcher/
-├── fetch.py          # 核心脚本（检测/下载/回退）
+├── fetch.py          # 核心脚本（检测/下载/回退；cookies 获取链的唯一实现）
 ├── gui.py            # 可视化客户端
 ├── config.json       # 配置文件
 ├── README.md
 ├── _cdp_cookies.py   # CDP cookies 导出（绕开 Chrome/Edge v20 App-Bound Encryption）
 ├── _cookie_crypto.py # 原生 DPAPI + AES-GCM cookies 解密（零依赖）
 ├── _logger.py        # 统一日志（自动轮转，目录不可写时降级并告警）
-├── _run_bili_test.py # B站端到端冒烟测试
+├── tests/            # 单元测试（python -m unittest discover -s tests）
 ├── cookies/          # cookies 导出目录（已在 .gitignore 中，切勿提交）
 └── downloads/        # 默认下载目录（已在 .gitignore 中）
 ```
+
+`fetch.try_browser_cookies()` 是「native DPAPI → browser_cookie3 → yt-dlp DPAPI」这条
+Cookie 获取链的**唯一实现**，命令行与 GUI 都调用它，避免两处各自演化。
 
 > **注意**：`cookies/` 下是**在线生效的登录凭据**，已加入 `.gitignore`，请勿提交。

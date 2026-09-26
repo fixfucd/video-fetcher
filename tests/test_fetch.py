@@ -196,6 +196,91 @@ class FetchStrategyTests(unittest.TestCase):
         self.assertNotIn("extractor_args", high)
         self.assertNotIn("extractor_args", fallback)
 
+    def test_douyin_has_no_redundant_low_quality_tier(self):
+        # A fallback whose format matches the HD preset would repeat the request
+        # that just failed, so douyin declares no separate tier at all.
+        high, fallback = fetch.get_platform_presets("douyin", {})
+        self.assertIsNone(fallback)
+        self.assertEqual(high["format"], "bestvideo+bestaudio/best")
+
+    def test_same_tier_detects_only_identical_downloads(self):
+        self.assertTrue(fetch.same_tier({"format": "best"}, {"format": "best"}))
+        self.assertFalse(fetch.same_tier(
+            {"format": "bestvideo+bestaudio/best"},
+            {"format": "bestvideo[height<=720]+bestaudio/best"},
+        ))
+        self.assertFalse(fetch.same_tier(
+            {"format": "best", "extractor_args": "youtube:player_client=web"},
+            {"format": "best", "extractor_args": "youtube:player_client=android"},
+        ))
+        self.assertFalse(fetch.same_tier(None, {"format": "best"}))
+
+    def test_douyin_failure_skips_the_no_cookie_repeat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cookie_file = Path(tmp) / "cookies.txt"
+            cookie_file.write_text(
+                "# Netscape HTTP Cookie File\n"
+                ".douyin.com\tTRUE\t/\tTRUE\t0\tsessionid\tsecret\n",
+                encoding="utf-8",
+            )
+            config = {"cookies_file": str(cookie_file)}
+            with patch.object(fetch, "load_config", return_value=config), patch.object(
+                fetch, "detect_installed_browsers", return_value={}
+            ), patch.object(fetch, "_has_bc3", return_value=False), patch.object(
+                fetch, "_has_cdp", return_value=False
+            ), patch.object(
+                fetch, "_try_run", return_value=(1, "HTTP Error 403: Forbidden")
+            ) as run, patch.object(fetch, "set_log_file"):
+                fetch.fetch("https://www.douyin.com/video/1", output_dir=tmp)
+
+        # Exactly one request: the cookie-file attempt. No fake "LQ" retry.
+        self.assertEqual(run.call_count, 1)
+
+    def test_alternates_reuse_the_detection_pass(self):
+        installed = {
+            "chrome": {"installed": True, "profiles": 1, "label": "Chrome", "key": "chrome"},
+            "edge": {"installed": True, "profiles": 1, "label": "Edge", "key": "edge"},
+        }
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            fetch, "load_config", return_value={}
+        ), patch.object(
+            fetch, "detect_installed_browsers", return_value=installed
+        ) as detect, patch.object(
+            fetch, "get_available_browsers", side_effect=AssertionError("must not rescan")
+        ), patch.object(
+            fetch, "_has_bc3", return_value=False
+        ), patch.object(
+            fetch, "_has_cdp", return_value=False
+        ), patch.object(
+            fetch, "_try_run", return_value=(1, "boom")
+        ), patch.object(
+            fetch, "_try_browser", return_value=(False, "boom")
+        ) as browser, patch.object(fetch, "set_log_file"):
+            fetch.fetch("https://example.com/v", output_dir=tmp)
+
+        self.assertEqual(detect.call_count, 1)
+        self.assertEqual([c.args[4] for c in browser.call_args_list], ["chrome", "edge"])
+
+    def test_not_logged_in_keeps_a_reason_instead_of_an_empty_tail(self):
+        def export_without_login(_browser_key, output_path):
+            Path(output_path).write_text(
+                "# Netscape HTTP Cookie File\n"
+                ".other.com\tTRUE\t/\tTRUE\t0\tSID\tsecret\n" + "# padding\n" * 10,
+                encoding="utf-8",
+            )
+            return True
+
+        with tempfile.TemporaryDirectory() as out, patch.object(
+            fetch, "_native_export", side_effect=export_without_login
+        ), patch.object(fetch, "_try_run", return_value=(0, "")) as run:
+            ok, reason = fetch._try_browser(
+                "https://www.youtube.com/watch?v=1", out, {}, {}, "chrome", platform="youtube"
+            )
+
+        self.assertFalse(ok)
+        self.assertIn("not logged in", reason)
+        run.assert_not_called()
+
     def test_douyin_web_detail_failure_skips_only_no_cookie_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             cookie_file = Path(tmp) / "cookies.txt"
