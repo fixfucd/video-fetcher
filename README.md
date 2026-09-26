@@ -183,6 +183,7 @@ video-fetcher/
 ├── _cdp_cookies.py   # CDP cookies 导出（绕开 Chrome/Edge v20 App-Bound Encryption）
 ├── _cookie_crypto.py # 原生 DPAPI + AES-GCM cookies 解密（零依赖）
 ├── _logger.py        # 统一日志（自动轮转，目录不可写时降级并告警）
+├── _run_bili_test.py # B站端到端冒烟脚本（对固定 BV 号跑一次真实下载）
 ├── tests/            # 单元测试（python -m unittest discover -s tests）
 ├── cookies/          # cookies 导出目录（已在 .gitignore 中，切勿提交）
 └── downloads/        # 默认下载目录（已在 .gitignore 中）
